@@ -31,6 +31,7 @@ import traceback
 from datetime import datetime, timedelta
 import random
 import string
+from pytz import timezone  # ✅ ADDED: Import pytz for IST timezone
 
 # ============================================
 # 1. ENVIRONMENT CONFIGURATION
@@ -39,14 +40,17 @@ import string
 # Load environment variables
 load_dotenv()
 
-# Institution Configuration - UPDATED to DAFFODILS HIGH SCHOOL
-INSTITUTION_NAME = "DAFFODILS HIGH SCHOOL"
+# Institution Configuration - UPDATED to SVR COMPUTERS
+INSTITUTION_NAME = "SVR COMPUTERS"
 INSTITUTION_SECRET = os.getenv("INSTITUTION_SECRET", os.getenv("SCHOOL_SECRET", "1234"))
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", os.getenv("SCHOOL_ADMIN_PASSWORD", "2109"))
 
+# ✅ ADDED: IST Timezone setup
+IST = timezone('Asia/Kolkata')
+
 # Streamlit Page Config
 st.set_page_config(
-    page_title=f"📚 DAFFODILS HIGH SCHOOL AI Exam Portal", 
+    page_title=f"📚 SVR COMPUTERS AI Exam Portal", 
     layout="wide",
     initial_sidebar_state="collapsed"
 )
@@ -852,8 +856,12 @@ def clear_cache():
     st.session_state.cached_data = {}
 
 # ============================================
-# ✅ PATCH: Timer Management for Auto-Submit
+# ✅ FIXED: Timer Management for Auto-Submit with IST
 # ============================================
+
+def get_current_ist_time():
+    """✅ ADDED: Get current datetime in IST"""
+    return datetime.now(IST)
 
 def auto_submit_exam():
     """
@@ -915,16 +923,15 @@ def auto_submit_exam():
     return True
 
 def initialize_exam_timer():
-    """Initialize exam end time based on exam schedule"""
+    """Initialize exam end time based on exam schedule using IST"""
     if st.session_state.exam_end_time is not None or st.session_state.exam_auto_submitted:
         return
     
     exam = st.session_state.active_exam
-    exam_duration = 3600  # Default 1 hour
     
     if exam.get('start_time') and exam.get('end_time') and exam.get('exam_date'):
         try:
-            # Parse exam date
+            # Parse exam date in IST
             if isinstance(exam['exam_date'], str):
                 exam_date = datetime.strptime(exam['exam_date'], '%Y-%m-%d').date()
             else:
@@ -936,13 +943,18 @@ def initialize_exam_timer():
             else:
                 end_time = exam['end_time']
             
+            # Create end datetime in IST
             end_datetime = datetime.combine(exam_date, end_time)
-            st.session_state.exam_end_time = end_datetime.timestamp()
+            # Make it timezone-aware as IST
+            end_datetime_ist = IST.localize(end_datetime)
+            st.session_state.exam_end_time = end_datetime_ist.timestamp()
+            
         except Exception as e:
-            # Fallback to default duration
-            st.session_state.exam_end_time = time.time() + exam_duration
+            # Fallback to default duration (1 hour)
+            st.session_state.exam_end_time = time.time() + 3600
     else:
-        st.session_state.exam_end_time = time.time() + exam_duration
+        # Fallback to default duration (1 hour)
+        st.session_state.exam_end_time = time.time() + 3600
 
 # ============================================
 # 10. STYLING - UPDATED WITH NEW REQUIREMENTS
@@ -1066,6 +1078,14 @@ st.markdown("""
         margin-bottom: 10px;
         border-left: 5px solid #ff9800;
     }
+    .expired-exam {
+        background-color: #f8d7da;
+        padding: 15px;
+        border-radius: 10px;
+        margin-bottom: 10px;
+        border-left: 5px solid #dc3545;
+        opacity: 0.7;
+    }
     .start-button {
         background-color: #4CAF50;
         color: white;
@@ -1160,9 +1180,9 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# Display Header - UPDATED with DAFFODILS HIGH SCHOOL
+# Display Header - UPDATED with SVR COMPUTERS
 st.markdown(f'<p class="main-header">📚 AI SMART EXAM PORTAL</p>', unsafe_allow_html=True)
-st.markdown(f'<p class="institution-name">🏫 DAFFODILS HIGH SCHOOL</p>', unsafe_allow_html=True)
+st.markdown(f'<p class="institution-name">🏫 SVR COMPUTERS</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-header">AI-Powered Examination System for All Educational Institutions</p>', unsafe_allow_html=True)
 
 # ============================================
@@ -1207,7 +1227,7 @@ def format_timestamp(ts):
 
 def get_time_remaining_seconds(target_datetime):
     """Get seconds remaining until target datetime"""
-    now = datetime.now()
+    now = get_current_ist_time()
     if target_datetime > now:
         return int((target_datetime - now).total_seconds())
     return 0
@@ -1220,7 +1240,7 @@ if st.session_state.user is None:
     
     st.markdown(f"""
         <div style="text-align: center; padding: 30px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 20px; margin-bottom: 30px;">
-            <h1 style="color: white; font-size: 48px;">📚 DAFFODILS HIGH SCHOOL</h1>
+            <h1 style="color: white; font-size: 48px;">📚 SVR COMPUTERS</h1>
             <p style="color: white; font-size: 20px;">Welcome to AI-Powered Smart Examination Portal</p>
         </div>
     """, unsafe_allow_html=True)
@@ -1239,14 +1259,14 @@ if st.session_state.user is None:
             # UPDATED: Added scrollable container
             st.markdown('<div class="scrollable-content">', unsafe_allow_html=True)
             
-            st.markdown(f"### 📝 Login to DAFFODILS HIGH SCHOOL")
+            st.markdown(f"### 📝 Login to SVR COMPUTERS")
             mode = st.radio("Select Action", ["Login", "New Registration"], horizontal=True, key="login_mode")
             
             u_name = st.text_input("👤 Username", key="login_username")
             u_pass = st.text_input("🔑 Password", type='password', key="login_password")
             
             if mode == "New Registration":
-                st.info(f"🏫 Institution: DAFFODILS HIGH SCHOOL")
+                st.info(f"🏫 Institution: SVR COMPUTERS")
                 secret_code = st.text_input("🔐 Institution Secret Code", type="password", key="reg_secret")
                 
                 role = st.selectbox("👔 Role", ["Teacher", "Student"], key="reg_role")
@@ -1377,7 +1397,7 @@ else:
     # Header
     col1, col2 = st.columns([3, 1])
     with col1:
-        st.markdown(f"### 📚 DAFFODILS HIGH SCHOOL")
+        st.markdown(f"### 📚 SVR COMPUTERS")
         st.markdown(f"👋 **{st.session_state.user['name']}** | Role: **{st.session_state.user['role']}**")
         if st.session_state.user['role'] == "Student" and st.session_state.user['batch']:
             st.markdown(f"📚 Batch: **{st.session_state.user['batch']}**")
@@ -2215,7 +2235,7 @@ else:
                 time.sleep(1)
                 st.rerun()
         
-        # Show available exams - ✅ OPTIMIZED WITH CACHING
+        # Show available exams - ✅ FIXED WITH PROPER IST TIME LOGIC
         else:
             st.markdown(f"### 🎓 Student Dashboard")
             
@@ -2229,9 +2249,12 @@ else:
                         st.cache_data.clear()
                         st.rerun()
                 
+                # ✅ FIXED: Use IST for date and time comparisons
+                now_ist = get_current_ist_time()
+                today_ist = now_ist.date()
+                
                 # ✅ OPTIMIZED: Use cached exams
-                today = datetime.now().date()
-                exams_data = get_cached_student_exams(user['batch'], INSTITUTION_NAME, today)
+                exams_data = get_cached_student_exams(user['batch'], INSTITUTION_NAME, today_ist)
                 
                 # Get attempted exams
                 attempted_key = f"attempted_{user['name']}"
@@ -2246,53 +2269,53 @@ else:
                 
                 if exams_data:
                     exams = pd.DataFrame(exams_data)
-                    current_time_obj = datetime.now().time()
                     
+                    # ✅ FIXED: Clear categorization based on IST
                     upcoming = []
                     available = []
-                    soon_exams = []
+                    expired = []  # ✅ ADDED: For exams that have passed
                     
                     for _, exam in exams.iterrows():
+                        # Skip if already attempted
                         if exam['id'] in attempted_ids:
                             continue
                         
+                        # Parse exam date
                         if isinstance(exam['exam_date'], str):
                             exam_date = datetime.strptime(exam['exam_date'], '%Y-%m-%d').date()
                         else:
                             exam_date = exam['exam_date']
                         
-                        if exam_date > today:
-                            upcoming.append(exam)
-                        elif exam_date == today:
-                            start = exam['start_time']
-                            end = exam['end_time']
-                            
-                            if start and end:
-                                if isinstance(start, str):
-                                    start_time_obj = datetime.strptime(start, '%H:%M:%S').time()
-                                else:
-                                    start_time_obj = start
-                                
-                                if isinstance(end, str):
-                                    end_time_obj = datetime.strptime(end, '%H:%M:%S').time()
-                                else:
-                                    end_time_obj = end
-                                
-                                if current_time_obj < start_time_obj:
-                                    start_datetime = datetime.combine(exam_date, start_time_obj)
-                                    seconds_until = get_time_remaining_seconds(start_datetime)
-                                    
-                                    if seconds_until <= 900:  # 15 minutes
-                                        soon_exams.append((exam, start_datetime, seconds_until))
-                                    else:
-                                        upcoming.append(exam)
-                                elif start_time_obj <= current_time_obj <= end_time_obj:
-                                    available.append(exam)
+                        # Parse times
+                        if isinstance(exam['start_time'], str):
+                            start_time = datetime.strptime(exam['start_time'], '%H:%M:%S').time()
+                        else:
+                            start_time = exam['start_time']
+                        
+                        if isinstance(exam['end_time'], str):
+                            end_time = datetime.strptime(exam['end_time'], '%H:%M:%S').time()
+                        else:
+                            end_time = exam['end_time']
+                        
+                        # Create timezone-aware datetime objects in IST
+                        exam_start_datetime = IST.localize(datetime.combine(exam_date, start_time))
+                        exam_end_datetime = IST.localize(datetime.combine(exam_date, end_time))
+                        
+                        # ✅ FIXED: Apply correct logic
+                        if now_ist < exam_start_datetime:
+                            # Future exam
+                            upcoming.append((exam, exam_start_datetime))
+                        elif exam_start_datetime <= now_ist <= exam_end_datetime:
+                            # Currently available
+                            available.append((exam, exam_start_datetime, exam_end_datetime))
+                        elif now_ist > exam_end_datetime:
+                            # Expired exam
+                            expired.append((exam, exam_end_datetime))
                     
                     # Display Available Exams
                     if available:
                         st.markdown("### 📝 Available Now")
-                        for exam in available:
+                        for exam, start_dt, end_dt in available:
                             st.markdown(f"""
                                 <div class="available-exam">
                                     <b>{exam['subject']}</b><br>
@@ -2301,6 +2324,7 @@ else:
                                 </div>
                             """, unsafe_allow_html=True)
                             
+                            # ✅ FIXED: Show start button only for available exams
                             if st.button("🚀 Start Exam", key=f"start_{exam['id']}"):
                                 # Load questions and set end time properly
                                 st.session_state.active_exam = dict(exam)
@@ -2312,34 +2336,17 @@ else:
                                 
                                 st.rerun()
                     
-                    # Display Soon Exams
-                    if soon_exams:
-                        st.markdown("### ⏳ Starting Soon")
-                        for exam, start_datetime, seconds_until in soon_exams:
-                            current_seconds = get_time_remaining_seconds(start_datetime)
+                    # Display Upcoming Exams
+                    if upcoming:
+                        st.markdown("### 📅 Upcoming Exams")
+                        for exam, start_dt in upcoming:
+                            # Calculate time until start for display
+                            seconds_until = get_time_remaining_seconds(start_dt)
                             
-                            if current_seconds <= 0:
-                                st.markdown(f"""
-                                    <div class="soon-exam">
-                                        <b>{exam['subject']}</b><br>
-                                        📅 Date: {exam['exam_date']} | ⏰ Time: {format_time(exam['start_time'])} - {format_time(exam['end_time'])}<br>
-                                        👨‍🏫 Teacher: {exam['teacher']}<br>
-                                        <span style="color: #4CAF50; font-weight: bold;">✅ Exam is ready to start!</span>
-                                    </div>
-                                """, unsafe_allow_html=True)
-                                
-                                if st.button("🚀 Click to Start Exam", key=f"start_soon_{exam['id']}"):
-                                    st.session_state.active_exam = dict(exam)
-                                    st.session_state.shuffled_qs = json.loads(exam['quiz_json'])
-                                    st.session_state.exam_answers = {}
-                                    st.session_state.answer_saved = {}
-                                    st.session_state.exam_auto_submitted = False
-                                    st.session_state.exam_end_time = None
-                                    
-                                    st.rerun()
-                            else:
-                                mins = int(current_seconds // 60)
-                                secs = int(current_seconds % 60)
+                            if seconds_until <= 900:  # 15 minutes or less
+                                # Show in special "Starting Soon" style
+                                mins = int(seconds_until // 60)
+                                secs = int(seconds_until % 60)
                                 
                                 st.markdown(f"""
                                     <div class="soon-exam">
@@ -2349,21 +2356,31 @@ else:
                                         <span style="color: #ff9800; font-weight: bold;">⏰ Your exam will start in {mins} minute(s) {secs} second(s)!</span>
                                     </div>
                                 """, unsafe_allow_html=True)
+                            else:
+                                # Regular upcoming exam
+                                st.markdown(f"""
+                                    <div class="upcoming-exam">
+                                        <b>{exam['subject']}</b><br>
+                                        📅 Date: {exam['exam_date']} | ⏰ Time: {format_time(exam['start_time'])} - {format_time(exam['end_time'])}<br>
+                                        👨‍🏫 Teacher: {exam['teacher']}
+                                    </div>
+                                """, unsafe_allow_html=True)
                     
-                    # Display Upcoming Exams
-                    if upcoming:
-                        st.markdown("### 📅 Upcoming Exams")
-                        for exam in upcoming:
+                    # Display Expired Exams (optional, can be hidden if preferred)
+                    if expired and st.checkbox("Show Expired Exams", value=False):
+                        st.markdown("### ⏰ Expired Exams")
+                        for exam, end_dt in expired:
                             st.markdown(f"""
-                                <div class="upcoming-exam">
+                                <div class="expired-exam">
                                     <b>{exam['subject']}</b><br>
                                     📅 Date: {exam['exam_date']} | ⏰ Time: {format_time(exam['start_time'])} - {format_time(exam['end_time'])}<br>
-                                    👨‍🏫 Teacher: {exam['teacher']}
+                                    👨‍🏫 Teacher: {exam['teacher']}<br>
+                                    <span style="color: #dc3545;">⏰ This exam has ended</span>
                                 </div>
                             """, unsafe_allow_html=True)
                     
-                    if not upcoming and not available and not soon_exams:
-                        st.info("🎉 No exams available at this time")
+                    if not upcoming and not available:
+                        st.info("📚 No exams scheduled for your batch")
                 else:
                     st.info("📚 No exams scheduled for your batch")
             
@@ -2413,7 +2430,7 @@ else:
 
 st.markdown(f"""
     <div class="footer">
-        © {datetime.now().year} DAFFODILS HIGH SCHOOL AI Exam Portal | All Rights Reserved<br>
-        Designed and Developed by <b>SVR COMPUTERS </b>
+        © {datetime.now().year} SVR COMPUTERS AI Exam Portal | All Rights Reserved<br>
+        Designed and Developed by <b>SVR Computers</b>
     </div>
 """, unsafe_allow_html=True)
