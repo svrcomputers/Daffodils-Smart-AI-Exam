@@ -8,7 +8,7 @@ import google.generativeai as genai
 import PIL.Image
 import json
 import hashlib
-import pandas as pd
+import pandas as pd 
 import re
 import os
 import time
