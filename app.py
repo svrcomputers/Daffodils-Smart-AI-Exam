@@ -39,17 +39,62 @@ import string
 # Load environment variables
 load_dotenv()
 
-# Institution Configuration - UPDATED to Daffodils High School
-INSTITUTION_NAME = "Daffodils High School"
+# Institution Configuration - UPDATED to SVR COMPUTERS
+INSTITUTION_NAME = "SVR COMPUTERS"
 INSTITUTION_SECRET = os.getenv("INSTITUTION_SECRET", os.getenv("SCHOOL_SECRET", "1234"))
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", os.getenv("SCHOOL_ADMIN_PASSWORD", "2109"))
 
 # Streamlit Page Config
 st.set_page_config(
-    page_title=f"📚 Daffodils High School AI Exam Portal", 
+    page_title=f"📚 SVR COMPUTERS AI Exam Portal", 
     layout="wide",
     initial_sidebar_state="collapsed"
 )
+
+# ============================================
+# ✅ SESSION STATE INITIALIZATION - MUST BE FIRST
+# ============================================
+
+# Initialize all session state variables BEFORE any other code
+if 'user' not in st.session_state:
+    st.session_state.user = None
+if 'active_exam' not in st.session_state:
+    st.session_state.active_exam = None
+if 'shuffled_qs' not in st.session_state:
+    st.session_state.shuffled_qs = []
+if 'auto_submitted' not in st.session_state:
+    st.session_state.auto_submitted = False
+if 'exam_answers' not in st.session_state:
+    st.session_state.exam_answers = {}
+if 'exam_result' not in st.session_state:
+    st.session_state.exam_result = None
+if 'answer_saved' not in st.session_state:
+    st.session_state.answer_saved = {}
+if 'last_refresh' not in st.session_state:
+    st.session_state.last_refresh = time.time()
+if 'dashboard_initialized' not in st.session_state:
+    st.session_state.dashboard_initialized = False
+if 'exam_timer_started' not in st.session_state:
+    st.session_state.exam_timer_started = False
+if 'exam_start_time' not in st.session_state:
+    st.session_state.exam_start_time = None
+if 'exam_submitted' not in st.session_state:
+    st.session_state.exam_submitted = False
+# ✅ OPTIMIZED: Cache for heavy queries
+if 'cache_timestamp' not in st.session_state:
+    st.session_state.cache_timestamp = 0
+if 'cached_data' not in st.session_state:
+    st.session_state.cached_data = {}
+# ✅ OPTIMIZED: Exam questions cache
+if 'exam_questions_loaded' not in st.session_state:
+    st.session_state.exam_questions_loaded = False
+# ✅ FIXED: ADD THESE NEW SESSION STATE VARIABLES FOR TIMER
+if 'exam_end_time' not in st.session_state:
+    st.session_state.exam_end_time = None
+if 'exam_auto_submitted' not in st.session_state:
+    st.session_state.exam_auto_submitted = False
+if 'timer_initialized' not in st.session_state:
+    st.session_state.timer_initialized = False
 
 # ============================================
 # 2. GEMINI AI CONFIGURATION
@@ -757,6 +802,149 @@ def process_uploaded_files(files):
     return all_content
 
 # ============================================
+# ✅ OPTIMIZED: Caching helper functions - MUST BE BEFORE LOGIN PAGE
+# ============================================
+
+@st.cache_data(ttl=60, max_entries=10)
+def get_cached_users(institution_name):
+    """Cache users data for 60 seconds"""
+    return execute_query(
+        "SELECT username, role, batch_name, is_approved, created_at FROM users WHERE institution_name=%s ORDER BY created_at DESC",
+        (institution_name,)
+    )
+
+@st.cache_data(ttl=120, max_entries=20)
+def get_cached_exams(teacher_name, institution_name):
+    """Cache teacher exams for 120 seconds"""
+    return execute_query(
+        "SELECT * FROM exams WHERE teacher=%s AND institution_name=%s ORDER BY created_at DESC",
+        (teacher_name, institution_name)
+    )
+
+@st.cache_data(ttl=60, max_entries=10)
+def get_cached_batches(teacher_name, institution_name):
+    """Cache teacher batches for 60 seconds"""
+    return execute_query(
+        "SELECT batch_name FROM teacher_batches WHERE teacher_username=%s AND institution_name=%s",
+        (teacher_name, institution_name)
+    )
+
+@st.cache_data(ttl=30, max_entries=50)
+def get_cached_student_exams(batch_name, institution_name, today):
+    """Cache student exams for 30 seconds"""
+    return execute_query(
+        "SELECT * FROM exams WHERE batch_name=%s AND institution_name=%s AND exam_date >= %s ORDER BY exam_date, start_time",
+        (batch_name, institution_name, today)
+    )
+
+@st.cache_data(ttl=60, max_entries=50)
+def get_cached_results(student_name, institution_name):
+    """Cache student results for 60 seconds"""
+    return execute_query(
+        "SELECT * FROM results WHERE student=%s AND institution_name=%s ORDER BY timestamp DESC",
+        (student_name, institution_name)
+    )
+
+def clear_cache():
+    """Clear all cached data"""
+    st.cache_data.clear()
+    st.session_state.cache_timestamp = time.time()
+    st.session_state.cached_data = {}
+
+# ============================================
+# ✅ PATCH: Timer Management for Auto-Submit
+# ============================================
+
+def auto_submit_exam():
+    """
+    Core auto-submit logic - checks if time expired and processes submission
+    Returns True if auto-submit was triggered, False otherwise
+    """
+    # Check if we're in an active exam and not already submitted
+    if not st.session_state.active_exam or st.session_state.exam_auto_submitted or st.session_state.exam_result:
+        return False
+    
+    # Get end time
+    if st.session_state.exam_end_time is None:
+        return False
+    
+    # Check if time expired
+    remaining_seconds = int(st.session_state.exam_end_time - time.time())
+    if remaining_seconds > 0:
+        return False
+    
+    # TIME EXPIRED - Process auto-submit
+    st.session_state.exam_auto_submitted = True
+    
+    # Calculate score
+    score = 0
+    review = []
+    
+    for i, q in enumerate(st.session_state.shuffled_qs):
+        user_ans = str(st.session_state.exam_answers.get(str(i), "")).strip()
+        correct_ans = str(q.get('answer', '')).strip()
+        
+        if user_ans and user_ans.lower() == correct_ans.lower():
+            score += 1
+        
+        review.append({
+            "question": q['question'],
+            "user_ans": user_ans if user_ans else "Not answered",
+            "correct_ans": correct_ans,
+            "options": q.get('options', []),
+            "explanation": q.get('explanation', 'No explanation available')
+        })
+    
+    # Save to database
+    execute_query(
+        "INSERT INTO results (student, exam_id, score, total, subject, review_json, institution_name) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        (st.session_state.user['name'], st.session_state.active_exam['id'], score, len(review), 
+         st.session_state.active_exam['subject'], json.dumps(review), INSTITUTION_NAME),
+        fetch=False,
+        commit=True
+    )
+    
+    # Set result - CRITICAL: Keep active_exam until result is displayed
+    st.session_state.exam_result = {
+        "score": score,
+        "total": len(review),
+        "subject": st.session_state.active_exam['subject'],
+        "review": review
+    }
+    
+    return True
+
+def initialize_exam_timer():
+    """Initialize exam end time based on exam schedule"""
+    if st.session_state.exam_end_time is not None or st.session_state.exam_auto_submitted:
+        return
+    
+    exam = st.session_state.active_exam
+    exam_duration = 3600  # Default 1 hour
+    
+    if exam.get('start_time') and exam.get('end_time') and exam.get('exam_date'):
+        try:
+            # Parse exam date
+            if isinstance(exam['exam_date'], str):
+                exam_date = datetime.strptime(exam['exam_date'], '%Y-%m-%d').date()
+            else:
+                exam_date = exam['exam_date']
+            
+            # Parse end time
+            if isinstance(exam['end_time'], str):
+                end_time = datetime.strptime(exam['end_time'], '%H:%M:%S').time()
+            else:
+                end_time = exam['end_time']
+            
+            end_datetime = datetime.combine(exam_date, end_time)
+            st.session_state.exam_end_time = end_datetime.timestamp()
+        except Exception as e:
+            # Fallback to default duration
+            st.session_state.exam_end_time = time.time() + exam_duration
+    else:
+        st.session_state.exam_end_time = time.time() + exam_duration
+
+# ============================================
 # 10. STYLING - UPDATED WITH NEW REQUIREMENTS
 # ============================================
 
@@ -972,9 +1160,9 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# Display Header - UPDATED with Daffodils High School
+# Display Header - UPDATED with SVR COMPUTERS
 st.markdown(f'<p class="main-header">📚 AI SMART EXAM PORTAL</p>', unsafe_allow_html=True)
-st.markdown(f'<p class="institution-name">🏫 Daffodils High School</p>', unsafe_allow_html=True)
+st.markdown(f'<p class="institution-name">🏫 SVR COMPUTERS</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-header">AI-Powered Examination System for All Educational Institutions</p>', unsafe_allow_html=True)
 
 # ============================================
@@ -1025,93 +1213,6 @@ def get_time_remaining_seconds(target_datetime):
     return 0
 
 # ============================================
-# ✅ OPTIMIZED: Session state with cache control
-# ============================================
-
-if 'user' not in st.session_state:
-    st.session_state.user = None
-if 'active_exam' not in st.session_state:
-    st.session_state.active_exam = None
-if 'shuffled_qs' not in st.session_state:
-    st.session_state.shuffled_qs = []
-if 'auto_submitted' not in st.session_state:
-    st.session_state.auto_submitted = False
-if 'exam_answers' not in st.session_state:
-    st.session_state.exam_answers = {}
-if 'exam_result' not in st.session_state:
-    st.session_state.exam_result = None
-if 'answer_saved' not in st.session_state:
-    st.session_state.answer_saved = {}
-if 'last_refresh' not in st.session_state:
-    st.session_state.last_refresh = time.time()
-if 'dashboard_initialized' not in st.session_state:
-    st.session_state.dashboard_initialized = False
-if 'exam_timer_started' not in st.session_state:
-    st.session_state.exam_timer_started = False
-if 'exam_start_time' not in st.session_state:
-    st.session_state.exam_start_time = None
-if 'exam_submitted' not in st.session_state:
-    st.session_state.exam_submitted = False
-# ✅ OPTIMIZED: Cache for heavy queries
-if 'cache_timestamp' not in st.session_state:
-    st.session_state.cache_timestamp = 0
-if 'cached_data' not in st.session_state:
-    st.session_state.cached_data = {}
-# ✅ OPTIMIZED: Exam questions cache
-if 'exam_questions_loaded' not in st.session_state:
-    st.session_state.exam_questions_loaded = False
-
-# ============================================
-# ✅ OPTIMIZED: Caching helper functions
-# ============================================
-
-@st.cache_data(ttl=60, max_entries=10)
-def get_cached_users(institution_name):
-    """Cache users data for 60 seconds"""
-    return execute_query(
-        "SELECT username, role, batch_name, is_approved, created_at FROM users WHERE institution_name=%s ORDER BY created_at DESC",
-        (institution_name,)
-    )
-
-@st.cache_data(ttl=120, max_entries=20)
-def get_cached_exams(teacher_name, institution_name):
-    """Cache teacher exams for 120 seconds"""
-    return execute_query(
-        "SELECT * FROM exams WHERE teacher=%s AND institution_name=%s ORDER BY created_at DESC",
-        (teacher_name, institution_name)
-    )
-
-@st.cache_data(ttl=60, max_entries=10)
-def get_cached_batches(teacher_name, institution_name):
-    """Cache teacher batches for 60 seconds"""
-    return execute_query(
-        "SELECT batch_name FROM teacher_batches WHERE teacher_username=%s AND institution_name=%s",
-        (teacher_name, institution_name)
-    )
-
-@st.cache_data(ttl=30, max_entries=50)
-def get_cached_student_exams(batch_name, institution_name, today):
-    """Cache student exams for 30 seconds"""
-    return execute_query(
-        "SELECT * FROM exams WHERE batch_name=%s AND institution_name=%s AND exam_date >= %s ORDER BY exam_date, start_time",
-        (batch_name, institution_name, today)
-    )
-
-@st.cache_data(ttl=60, max_entries=50)
-def get_cached_results(student_name, institution_name):
-    """Cache student results for 60 seconds"""
-    return execute_query(
-        "SELECT * FROM results WHERE student=%s AND institution_name=%s ORDER BY timestamp DESC",
-        (student_name, institution_name)
-    )
-
-def clear_cache():
-    """Clear all cached data"""
-    st.cache_data.clear()
-    st.session_state.cache_timestamp = time.time()
-    st.session_state.cached_data = {}
-
-# ============================================
 # 13. LOGIN PAGE - UPDATED WITH APPROVAL CHECK
 # ============================================
 
@@ -1119,7 +1220,7 @@ if st.session_state.user is None:
     
     st.markdown(f"""
         <div style="text-align: center; padding: 30px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 20px; margin-bottom: 30px;">
-            <h1 style="color: white; font-size: 48px;">📚 Daffodils High School</h1>
+            <h1 style="color: white; font-size: 48px;">📚 SVR COMPUTERS</h1>
             <p style="color: white; font-size: 20px;">Welcome to AI-Powered Smart Examination Portal</p>
         </div>
     """, unsafe_allow_html=True)
@@ -1138,14 +1239,14 @@ if st.session_state.user is None:
             # UPDATED: Added scrollable container
             st.markdown('<div class="scrollable-content">', unsafe_allow_html=True)
             
-            st.markdown(f"### 📝 Login to Daffodils High School")
+            st.markdown(f"### 📝 Login to SVR COMPUTERS")
             mode = st.radio("Select Action", ["Login", "New Registration"], horizontal=True, key="login_mode")
             
             u_name = st.text_input("👤 Username", key="login_username")
             u_pass = st.text_input("🔑 Password", type='password', key="login_password")
             
             if mode == "New Registration":
-                st.info(f"🏫 Institution: Daffodils High School")
+                st.info(f"🏫 Institution: SVR COMPUTERS")
                 secret_code = st.text_input("🔐 Institution Secret Code", type="password", key="reg_secret")
                 
                 role = st.selectbox("👔 Role", ["Teacher", "Student"], key="reg_role")
@@ -1276,7 +1377,7 @@ else:
     # Header
     col1, col2 = st.columns([3, 1])
     with col1:
-        st.markdown(f"### 📚 Daffodils High School")
+        st.markdown(f"### 📚 SVR COMPUTERS")
         st.markdown(f"👋 **{st.session_state.user['name']}** | Role: **{st.session_state.user['role']}**")
         if st.session_state.user['role'] == "Student" and st.session_state.user['batch']:
             st.markdown(f"📚 Batch: **{st.session_state.user['batch']}**")
@@ -1288,6 +1389,9 @@ else:
             st.session_state.exam_result = None
             st.session_state.exam_answers = {}
             st.session_state.dashboard_initialized = False
+            st.session_state.exam_end_time = None
+            st.session_state.exam_auto_submitted = False
+            st.session_state.timer_initialized = False
             clear_cache()
             st.rerun()
     
@@ -1919,7 +2023,7 @@ else:
                 st.info("No batches assigned")
     
     # ============================================
-    # ✅ OPTIMIZED: STUDENT PANEL WITH AUTO-SAVE (NO BUTTON)
+    # ✅ FIXED: STUDENT PANEL WITH REAL-TIME TIMER AND AUTO-SUBMIT
     # ============================================
     elif user['role'] == "Student":
         
@@ -1957,144 +2061,47 @@ else:
                     key="download_pdf"
                 )
             
+            # Clear result and return to dashboard
             if st.button("📊 Back to Dashboard", use_container_width=True):
+                # Clean up exam state
                 st.session_state.exam_result = None
+                st.session_state.active_exam = None
+                st.session_state.shuffled_qs = []
+                st.session_state.exam_answers = {}
+                st.session_state.exam_end_time = None
+                st.session_state.exam_auto_submitted = False
                 st.rerun()
         
-        # ✅ OPTIMIZED: Active exam - NO DATABASE CALLS, AUTO-SAVE
+        # ✅ FIXED: Active exam with real-time timer and auto-submit
         elif st.session_state.active_exam:
             exam = st.session_state.active_exam
             
-            # Calculate end time once
-            if 'exam_end_time' not in st.session_state:
-                # Calculate exam duration
-                exam_duration = 3600  # Default 1 hour
-                
-                if exam.get('start_time') and exam.get('end_time') and exam.get('exam_date'):
-                    try:
-                        if isinstance(exam['exam_date'], str):
-                            exam_date = datetime.strptime(exam['exam_date'], '%Y-%m-%d').date()
-                        else:
-                            exam_date = exam['exam_date']
-                        
-                        if isinstance(exam['start_time'], str):
-                            start_time = datetime.strptime(exam['start_time'], '%H:%M:%S').time()
-                        else:
-                            start_time = exam['start_time']
-                        
-                        if isinstance(exam['end_time'], str):
-                            end_time = datetime.strptime(exam['end_time'], '%H:%M:%S').time()
-                        else:
-                            end_time = exam['end_time']
-                        
-                        end_datetime = datetime.combine(exam_date, end_time)
-                        st.session_state.exam_end_time = end_datetime.timestamp()
-                    except:
-                        st.session_state.exam_end_time = time.time() + exam_duration
-                else:
-                    st.session_state.exam_end_time = time.time() + exam_duration
+            # Initialize timer if needed
+            initialize_exam_timer()
             
-            # ✅ FIXED: Calculate remaining time with None check
-            if st.session_state.exam_end_time is None:
-                remaining_seconds = 3600  # Default 1 hour if not set
-            else:
+            # Check for auto-submit FIRST - before any display
+            auto_submitted = auto_submit_exam()
+            if auto_submitted:
+                # Result is now in st.session_state.exam_result
+                # Clear exam state but keep result
+                st.session_state.active_exam = None
+                st.session_state.shuffled_qs = []
+                st.rerun()
+            
+            # Calculate remaining time for display
+            remaining_seconds = 0
+            if st.session_state.exam_end_time:
                 remaining_seconds = int(st.session_state.exam_end_time - time.time())
                 if remaining_seconds < 0:
                     remaining_seconds = 0
             
-            # Auto-submit if time expired
-            if remaining_seconds <= 0 and not st.session_state.get('exam_submitted', False):
-                st.session_state.exam_submitted = True
-                
-                # Calculate score
-                score = 0
-                review = []
-                
-                for i, q in enumerate(st.session_state.shuffled_qs):
-                    user_ans = str(st.session_state.exam_answers.get(str(i), "")).strip()
-                    correct_ans = str(q.get('answer', '')).strip()
-                    
-                    if user_ans and user_ans.lower() == correct_ans.lower():
-                        score += 1
-                    
-                    review.append({
-                        "question": q['question'],
-                        "user_ans": user_ans if user_ans else "Not answered",
-                        "correct_ans": correct_ans,
-                        "options": q.get('options', []),
-                        "explanation": q.get('explanation', 'No explanation available')
-                    })
-                
-                # ✅ OPTIMIZED: Save to database only once at the end
-                execute_query(
-                    "INSERT INTO results (student, exam_id, score, total, subject, review_json, institution_name) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                    (user['name'], exam['id'], score, len(review), exam['subject'], json.dumps(review), INSTITUTION_NAME),
-                    fetch=False,
-                    commit=True
-                )
-                
-                st.session_state.exam_result = {
-                    "score": score,
-                    "total": len(review),
-                    "subject": exam['subject'],
-                    "review": review
-                }
-                
-                st.session_state.active_exam = None
-                st.session_state.shuffled_qs = []
-                st.session_state.exam_answers = {}
-                st.session_state.answer_saved = {}
-                st.session_state.exam_end_time = None
-                st.session_state.exam_submitted = False
-                
-                st.rerun()
-            
-            # ✅ OPTIMIZED: Timer without meta refresh - using JavaScript only
-            if remaining_seconds > 0:
-                hours = remaining_seconds // 3600
-                minutes = (remaining_seconds % 3600) // 60
-                seconds = remaining_seconds % 60
-                
-                timer_html = f"""
-                <div class="timer-box" id="countdown-timer">
-                    ⏰ Time Remaining: {hours:02d}:{minutes:02d}:{seconds:02d}
+            # Display timer
+            timer_placeholder = st.empty()
+            timer_placeholder.markdown(f"""
+                <div class="timer-box">
+                    ⏰ Time Remaining: {remaining_seconds // 3600:02d}:{(remaining_seconds % 3600) // 60:02d}:{remaining_seconds % 60:02d}
                 </div>
-                
-                <script>
-                    // Get the end time from session state
-                    var endTime = {st.session_state.exam_end_time} * 1000;
-                    
-                    function updateTimer() {{
-                        var now = new Date().getTime();
-                        var distance = endTime - now;
-                        
-                        var timerElement = document.getElementById('countdown-timer');
-                        
-                        if (distance <= 0) {{
-                            timerElement.innerHTML = '⏰ Time Remaining: 00:00:00';
-                            // Trigger auto-submit by reloading the page
-                            window.location.reload();
-                        }} else {{
-                            var hours = Math.floor(distance / (1000 * 60 * 60));
-                            var minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
-                            var seconds = Math.floor((distance % (1000 * 60)) / 1000);
-                            
-                            var timeString = 
-                                (hours < 10 ? '0' + hours : hours) + ':' + 
-                                (minutes < 10 ? '0' + minutes : minutes) + ':' + 
-                                (seconds < 10 ? '0' + seconds : seconds);
-                            
-                            timerElement.innerHTML = '⏰ Time Remaining: ' + timeString;
-                        }}
-                    }}
-                    
-                    // Update timer every second
-                    updateTimer();
-                    setInterval(updateTimer, 1000);
-                </script>
-                """
-                
-                st.markdown(timer_html, unsafe_allow_html=True)
+            """, unsafe_allow_html=True)
             
             st.markdown(f"""
                 <div class="exam-info">
@@ -2104,7 +2111,7 @@ else:
                 </div>
             """, unsafe_allow_html=True)
             
-            # ✅ OPTIMIZED: Questions with AUTO-SAVE (no button, no rerun)
+            # Questions with AUTO-SAVE
             st.markdown("### 📝 Answer Questions (Answers auto-saved)")
             
             for i, q in enumerate(st.session_state.shuffled_qs):
@@ -2142,65 +2149,71 @@ else:
                         horizontal=True
                     )
                 
-                # ✅ AUTO-SAVE: Update session state when answer changes
+                # AUTO-SAVE: Update session state when answer changes
                 if answer != saved_answer:
                     st.session_state.exam_answers[str(i)] = answer
                     st.session_state.answer_saved[str(i)] = True
-                    # No rerun needed - just update session state silently
                 
-                # Show small indicator that answer is saved (without rerun)
+                # Show small indicator that answer is saved
                 if st.session_state.exam_answers.get(str(i), ""):
                     st.caption("✓ Saved")
                 
                 st.divider()
             
-            # Manual submit button
-            col1, col2, col3 = st.columns([1, 2, 1])
-            with col2:
-                if st.button("📤 Submit Exam", type="primary", use_container_width=True, key="submit_exam"):
-                    
-                    # Calculate score
-                    score = 0
-                    review = []
-                    
-                    for i, q in enumerate(st.session_state.shuffled_qs):
-                        user_ans = str(st.session_state.exam_answers.get(str(i), "")).strip()
-                        correct_ans = str(q.get('answer', '')).strip()
-                    
-                        if user_ans and user_ans.lower() == correct_ans.lower():
-                            score += 1
+            # Manual submit button (only show if time remaining)
+            if remaining_seconds > 0 and not st.session_state.exam_auto_submitted:
+                col1, col2, col3 = st.columns([1, 2, 1])
+                with col2:
+                    if st.button("📤 Submit Exam", type="primary", use_container_width=True, key="submit_exam"):
                         
-                        review.append({
-                            "question": q['question'],
-                            "user_ans": user_ans if user_ans else "Not answered",
-                            "correct_ans": correct_ans,
-                            "options": q.get('options', []),
-                            "explanation": q.get('explanation', 'No explanation available')
-                        })
-                    
-                    # ✅ OPTIMIZED: Save to database only once at the end
-                    execute_query(
-                        "INSERT INTO results (student, exam_id, score, total, subject, review_json, institution_name) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                        (user['name'], exam['id'], score, len(review), exam['subject'], json.dumps(review), INSTITUTION_NAME),
-                        fetch=False,
-                        commit=True
-                    )
-                    
-                    st.session_state.exam_result = {
-                        "score": score,
-                        "total": len(review),
-                        "subject": exam['subject'],
-                        "review": review
-                    }
-                    
-                    st.session_state.active_exam = None
-                    st.session_state.shuffled_qs = []
-                    st.session_state.exam_answers = {}
-                    st.session_state.answer_saved = {}
-                    st.session_state.exam_end_time = None
-                    st.session_state.exam_submitted = False
-                    
-                    st.rerun()
+                        # Calculate score
+                        score = 0
+                        review = []
+                        
+                        for i, q in enumerate(st.session_state.shuffled_qs):
+                            user_ans = str(st.session_state.exam_answers.get(str(i), "")).strip()
+                            correct_ans = str(q.get('answer', '')).strip()
+                        
+                            if user_ans and user_ans.lower() == correct_ans.lower():
+                                score += 1
+                            
+                            review.append({
+                                "question": q['question'],
+                                "user_ans": user_ans if user_ans else "Not answered",
+                                "correct_ans": correct_ans,
+                                "options": q.get('options', []),
+                                "explanation": q.get('explanation', 'No explanation available')
+                            })
+                        
+                        # Save to database
+                        execute_query(
+                            "INSERT INTO results (student, exam_id, score, total, subject, review_json, institution_name) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                            (user['name'], exam['id'], score, len(review), exam['subject'], json.dumps(review), INSTITUTION_NAME),
+                            fetch=False,
+                            commit=True
+                        )
+                        
+                        st.session_state.exam_result = {
+                            "score": score,
+                            "total": len(review),
+                            "subject": exam['subject'],
+                            "review": review
+                        }
+                        
+                        # Clear exam state but keep result
+                        st.session_state.active_exam = None
+                        st.session_state.shuffled_qs = []
+                        st.session_state.exam_answers = {}
+                        st.session_state.answer_saved = {}
+                        st.session_state.exam_end_time = None
+                        st.session_state.exam_auto_submitted = False
+                        
+                        st.rerun()
+            
+            # Auto-refresh for timer update - runs every second
+            if remaining_seconds > 0:
+                time.sleep(1)
+                st.rerun()
         
         # Show available exams - ✅ OPTIMIZED WITH CACHING
         else:
@@ -2289,34 +2302,13 @@ else:
                             """, unsafe_allow_html=True)
                             
                             if st.button("🚀 Start Exam", key=f"start_{exam['id']}"):
-                                # ✅ FIXED: Load questions and set end time properly
+                                # Load questions and set end time properly
                                 st.session_state.active_exam = dict(exam)
                                 st.session_state.shuffled_qs = json.loads(exam['quiz_json'])
                                 st.session_state.exam_answers = {}
                                 st.session_state.answer_saved = {}
-                                st.session_state.exam_submitted = False
-                                
-                                # Set exam end time
-                                if exam.get('end_time') and exam.get('exam_date'):
-                                    try:
-                                        if isinstance(exam['exam_date'], str):
-                                            exam_date = datetime.strptime(exam['exam_date'], '%Y-%m-%d').date()
-                                        else:
-                                            exam_date = exam['exam_date']
-                                        
-                                        if isinstance(exam['end_time'], str):
-                                            end_time = datetime.strptime(exam['end_time'], '%H:%M:%S').time()
-                                        else:
-                                            end_time = exam['end_time']
-                                        
-                                        end_datetime = datetime.combine(exam_date, end_time)
-                                        st.session_state.exam_end_time = end_datetime.timestamp()
-                                    except:
-                                        # Fallback to 1 hour from now
-                                        st.session_state.exam_end_time = time.time() + 3600
-                                else:
-                                    # Default 1 hour exam
-                                    st.session_state.exam_end_time = time.time() + 3600
+                                st.session_state.exam_auto_submitted = False
+                                st.session_state.exam_end_time = None  # Will be set in exam page
                                 
                                 st.rerun()
                     
@@ -2341,27 +2333,8 @@ else:
                                     st.session_state.shuffled_qs = json.loads(exam['quiz_json'])
                                     st.session_state.exam_answers = {}
                                     st.session_state.answer_saved = {}
-                                    st.session_state.exam_submitted = False
-                                    
-                                    # Set exam end time
-                                    if exam.get('end_time') and exam.get('exam_date'):
-                                        try:
-                                            if isinstance(exam['exam_date'], str):
-                                                exam_date = datetime.strptime(exam['exam_date'], '%Y-%m-%d').date()
-                                            else:
-                                                exam_date = exam['exam_date']
-                                            
-                                            if isinstance(exam['end_time'], str):
-                                                end_time = datetime.strptime(exam['end_time'], '%H:%M:%S').time()
-                                            else:
-                                                end_time = exam['end_time']
-                                            
-                                            end_datetime = datetime.combine(exam_date, end_time)
-                                            st.session_state.exam_end_time = end_datetime.timestamp()
-                                        except:
-                                            st.session_state.exam_end_time = time.time() + 3600
-                                    else:
-                                        st.session_state.exam_end_time = time.time() + 3600
+                                    st.session_state.exam_auto_submitted = False
+                                    st.session_state.exam_end_time = None
                                     
                                     st.rerun()
                             else:
@@ -2440,7 +2413,7 @@ else:
 
 st.markdown(f"""
     <div class="footer">
-        © {datetime.now().year} Daffodils High School AI Exam Portal | All Rights Reserved<br>
-        Designed and Developed by <b>SVR COMPUTERS </b>
+        © {datetime.now().year} SVR COMPUTERS AI Exam Portal | All Rights Reserved<br>
+        Designed and Developed by <b>SVR Computers</b>
     </div>
 """, unsafe_allow_html=True)
