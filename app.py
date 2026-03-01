@@ -39,14 +39,14 @@ import string
 # Load environment variables
 load_dotenv()
 
-# Institution Configuration - UPDATED to Daffodils High School
-INSTITUTION_NAME = "Daffodils High School"
+# Institution Configuration - UPDATED to DAFFODILS HIGH SCHOOL
+INSTITUTION_NAME = "DAFFODILS HIGH SCHOOL"
 INSTITUTION_SECRET = os.getenv("INSTITUTION_SECRET", os.getenv("SCHOOL_SECRET", "1234"))
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", os.getenv("SCHOOL_ADMIN_PASSWORD", "2109"))
 
 # Streamlit Page Config
 st.set_page_config(
-    page_title=f"📚 Daffodils High School AI Exam Portal", 
+    page_title=f"📚 DAFFODILS HIGH SCHOOL AI Exam Portal", 
     layout="wide",
     initial_sidebar_state="collapsed"
 )
@@ -1160,9 +1160,9 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# Display Header - UPDATED with Daffodils High School
+# Display Header - UPDATED with DAFFODILS HIGH SCHOOL
 st.markdown(f'<p class="main-header">📚 AI SMART EXAM PORTAL</p>', unsafe_allow_html=True)
-st.markdown(f'<p class="institution-name">🏫 Daffodils High School</p>', unsafe_allow_html=True)
+st.markdown(f'<p class="institution-name">🏫 DAFFODILS HIGH SCHOOL</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-header">AI-Powered Examination System for All Educational Institutions</p>', unsafe_allow_html=True)
 
 # ============================================
@@ -1220,7 +1220,7 @@ if st.session_state.user is None:
     
     st.markdown(f"""
         <div style="text-align: center; padding: 30px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 20px; margin-bottom: 30px;">
-            <h1 style="color: white; font-size: 48px;">📚 Daffodils High School</h1>
+            <h1 style="color: white; font-size: 48px;">📚 DAFFODILS HIGH SCHOOL</h1>
             <p style="color: white; font-size: 20px;">Welcome to AI-Powered Smart Examination Portal</p>
         </div>
     """, unsafe_allow_html=True)
@@ -1239,14 +1239,14 @@ if st.session_state.user is None:
             # UPDATED: Added scrollable container
             st.markdown('<div class="scrollable-content">', unsafe_allow_html=True)
             
-            st.markdown(f"### 📝 Login to Daffodils High School")
+            st.markdown(f"### 📝 Login to DAFFODILS HIGH SCHOOL")
             mode = st.radio("Select Action", ["Login", "New Registration"], horizontal=True, key="login_mode")
             
             u_name = st.text_input("👤 Username", key="login_username")
             u_pass = st.text_input("🔑 Password", type='password', key="login_password")
             
             if mode == "New Registration":
-                st.info(f"🏫 Institution: Daffodils High School")
+                st.info(f"🏫 Institution: DAFFODILS HIGH SCHOOL")
                 secret_code = st.text_input("🔐 Institution Secret Code", type="password", key="reg_secret")
                 
                 role = st.selectbox("👔 Role", ["Teacher", "Student"], key="reg_role")
@@ -1377,7 +1377,7 @@ else:
     # Header
     col1, col2 = st.columns([3, 1])
     with col1:
-        st.markdown(f"### 📚 Daffodils High School")
+        st.markdown(f"### 📚 DAFFODILS HIGH SCHOOL")
         st.markdown(f"👋 **{st.session_state.user['name']}** | Role: **{st.session_state.user['role']}**")
         if st.session_state.user['role'] == "Student" and st.session_state.user['batch']:
             st.markdown(f"📚 Batch: **{st.session_state.user['batch']}**")
@@ -2413,7 +2413,7 @@ else:
 
 st.markdown(f"""
     <div class="footer">
-        © {datetime.now().year} Daffodils High School AI Exam Portal | All Rights Reserved<br>
-        Designed and Developed by <b>SVR COMPUTERSB</b>
+        © {datetime.now().year} DAFFODILS HIGH SCHOOL AI Exam Portal | All Rights Reserved<br>
+        Designed and Developed by <b>SVR COMPUTERS </b>
     </div>
 """, unsafe_allow_html=True)
