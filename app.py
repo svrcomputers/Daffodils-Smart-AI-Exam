@@ -31,7 +31,6 @@ import traceback
 from datetime import datetime, timedelta
 import random
 import string
-from pytz import timezone  # ✅ ADDED: Import pytz for IST timezone
 
 # ============================================
 # 1. ENVIRONMENT CONFIGURATION
@@ -40,17 +39,14 @@ from pytz import timezone  # ✅ ADDED: Import pytz for IST timezone
 # Load environment variables
 load_dotenv()
 
-# Institution Configuration - UPDATED to Daffodils High School
-INSTITUTION_NAME = "Daffodils High School"
+# Institution Configuration - UPDATED to DAFFODILS HIGH SCHOOL
+INSTITUTION_NAME = "DAFFODILS HIGH SCHOOL"
 INSTITUTION_SECRET = os.getenv("INSTITUTION_SECRET", os.getenv("SCHOOL_SECRET", "1234"))
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", os.getenv("SCHOOL_ADMIN_PASSWORD", "2109"))
 
-# ✅ ADDED: IST Timezone setup
-IST = timezone('Asia/Kolkata')
-
 # Streamlit Page Config
 st.set_page_config(
-    page_title=f"📚 Daffodils High School AI Exam Portal", 
+    page_title=f"📚 DAFFODILS HIGH SCHOOL AI Exam Portal", 
     layout="wide",
     initial_sidebar_state="collapsed"
 )
@@ -99,6 +95,11 @@ if 'exam_auto_submitted' not in st.session_state:
     st.session_state.exam_auto_submitted = False
 if 'timer_initialized' not in st.session_state:
     st.session_state.timer_initialized = False
+# ✅ NEW: For admin approval select all functionality
+if 'select_all_state' not in st.session_state:
+    st.session_state.select_all_state = False
+if 'selected_pending_users' not in st.session_state:
+    st.session_state.selected_pending_users = set()
 
 # ============================================
 # 2. GEMINI AI CONFIGURATION
@@ -609,23 +610,24 @@ def generate_teacher_pdf(teacher_name, class_name, subject, results_data, instit
     
     # Results Table
     if results_data:
-        table_data = [["S.No", "Student Name", "Score", "Total", "Percentage", "Date"]]
+        table_data = [["S.No", "Student Name", "Subject", "Score", "Total", "Percentage", "Date"]]
         
         for idx, row in enumerate(results_data, 1):
             percentage = int((row['score']/row['total'])*100)
             table_data.append([
                 str(idx),
                 row['student'],
+                row['subject'],  # ✅ FIXED: Subject is now displayed
                 str(row['score']),
                 str(row['total']),
                 f"{percentage}%",
                 row['date'][:10] if row['date'] else "N/A"
             ])
         
-        results_table = Table(table_data, colWidths=[0.5*inch, 1.5*inch, 0.7*inch, 0.7*inch, 0.7*inch, 1*inch])
+        results_table = Table(table_data, colWidths=[0.4*inch, 1.2*inch, 1*inch, 0.6*inch, 0.6*inch, 0.7*inch, 1*inch])
         results_table.setStyle(TableStyle([
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
             ('GRID', (0, 0), (-1, -1), 0.5, colors.lightgrey),
@@ -817,6 +819,24 @@ def get_cached_users(institution_name):
         (institution_name,)
     )
 
+# ✅ NEW: Get cached teachers only
+@st.cache_data(ttl=60, max_entries=10)
+def get_cached_teachers(institution_name):
+    """Cache teachers data for 60 seconds"""
+    return execute_query(
+        "SELECT username, role, batch_name, is_approved, created_at FROM users WHERE institution_name=%s AND role='Teacher' ORDER BY created_at DESC",
+        (institution_name,)
+    )
+
+# ✅ NEW: Get cached students only
+@st.cache_data(ttl=60, max_entries=10)
+def get_cached_students(institution_name):
+    """Cache students data for 60 seconds"""
+    return execute_query(
+        "SELECT username, role, batch_name, is_approved, created_at FROM users WHERE institution_name=%s AND role='Student' ORDER BY created_at DESC",
+        (institution_name,)
+    )
+
 @st.cache_data(ttl=120, max_entries=20)
 def get_cached_exams(teacher_name, institution_name):
     """Cache teacher exams for 120 seconds"""
@@ -856,12 +876,8 @@ def clear_cache():
     st.session_state.cached_data = {}
 
 # ============================================
-# ✅ FIXED: Timer Management for Auto-Submit with IST
+# ✅ PATCH: Timer Management for Auto-Submit
 # ============================================
-
-def get_current_ist_time():
-    """✅ ADDED: Get current datetime in IST"""
-    return datetime.now(IST)
 
 def auto_submit_exam():
     """
@@ -923,15 +939,16 @@ def auto_submit_exam():
     return True
 
 def initialize_exam_timer():
-    """Initialize exam end time based on exam schedule using IST"""
+    """Initialize exam end time based on exam schedule"""
     if st.session_state.exam_end_time is not None or st.session_state.exam_auto_submitted:
         return
     
     exam = st.session_state.active_exam
+    exam_duration = 3600  # Default 1 hour
     
     if exam.get('start_time') and exam.get('end_time') and exam.get('exam_date'):
         try:
-            # Parse exam date in IST
+            # Parse exam date
             if isinstance(exam['exam_date'], str):
                 exam_date = datetime.strptime(exam['exam_date'], '%Y-%m-%d').date()
             else:
@@ -943,18 +960,13 @@ def initialize_exam_timer():
             else:
                 end_time = exam['end_time']
             
-            # Create end datetime in IST
             end_datetime = datetime.combine(exam_date, end_time)
-            # Make it timezone-aware as IST
-            end_datetime_ist = IST.localize(end_datetime)
-            st.session_state.exam_end_time = end_datetime_ist.timestamp()
-            
+            st.session_state.exam_end_time = end_datetime.timestamp()
         except Exception as e:
-            # Fallback to default duration (1 hour)
-            st.session_state.exam_end_time = time.time() + 3600
+            # Fallback to default duration
+            st.session_state.exam_end_time = time.time() + exam_duration
     else:
-        # Fallback to default duration (1 hour)
-        st.session_state.exam_end_time = time.time() + 3600
+        st.session_state.exam_end_time = time.time() + exam_duration
 
 # ============================================
 # 10. STYLING - UPDATED WITH NEW REQUIREMENTS
@@ -1078,14 +1090,6 @@ st.markdown("""
         margin-bottom: 10px;
         border-left: 5px solid #ff9800;
     }
-    .expired-exam {
-        background-color: #f8d7da;
-        padding: 15px;
-        border-radius: 10px;
-        margin-bottom: 10px;
-        border-left: 5px solid #dc3545;
-        opacity: 0.7;
-    }
     .start-button {
         background-color: #4CAF50;
         color: white;
@@ -1177,12 +1181,33 @@ st.markdown("""
         font-weight: bold;
         display: inline-block;
     }
+    /* NEW: Teacher and Student table styles */
+    .teacher-table {
+        background-color: #e3f2fd;
+        padding: 15px;
+        border-radius: 10px;
+        margin-bottom: 20px;
+    }
+    .student-table {
+        background-color: #f1f8e9;
+        padding: 15px;
+        border-radius: 10px;
+        margin-bottom: 20px;
+    }
+    /* Selection box style */
+    .selection-box {
+        background-color: #fff;
+        border: 2px solid #FF6B35;
+        border-radius: 10px;
+        padding: 15px;
+        margin: 10px 0;
+    }
     </style>
     """, unsafe_allow_html=True)
 
-# Display Header - UPDATED with Daffodils High School
+# Display Header - UPDATED with DAFFODILS HIGH SCHOOL
 st.markdown(f'<p class="main-header">📚 AI SMART EXAM PORTAL</p>', unsafe_allow_html=True)
-st.markdown(f'<p class="institution-name">🏫 Daffodils High School</p>', unsafe_allow_html=True)
+st.markdown(f'<p class="institution-name">🏫 DAFFODILS HIGH SCHOOL</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-header">AI-Powered Examination System for All Educational Institutions</p>', unsafe_allow_html=True)
 
 # ============================================
@@ -1227,7 +1252,7 @@ def format_timestamp(ts):
 
 def get_time_remaining_seconds(target_datetime):
     """Get seconds remaining until target datetime"""
-    now = get_current_ist_time()
+    now = datetime.now()
     if target_datetime > now:
         return int((target_datetime - now).total_seconds())
     return 0
@@ -1240,7 +1265,7 @@ if st.session_state.user is None:
     
     st.markdown(f"""
         <div style="text-align: center; padding: 30px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 20px; margin-bottom: 30px;">
-            <h1 style="color: white; font-size: 48px;">📚 Daffodils High School</h1>
+            <h1 style="color: white; font-size: 48px;">📚 DAFFODILS HIGH SCHOOL</h1>
             <p style="color: white; font-size: 20px;">Welcome to AI-Powered Smart Examination Portal</p>
         </div>
     """, unsafe_allow_html=True)
@@ -1259,14 +1284,14 @@ if st.session_state.user is None:
             # UPDATED: Added scrollable container
             st.markdown('<div class="scrollable-content">', unsafe_allow_html=True)
             
-            st.markdown(f"### 📝 Login to Daffodils High School")
+            st.markdown(f"### 📝 Login to DAFFODILS HIGH SCHOOL")
             mode = st.radio("Select Action", ["Login", "New Registration"], horizontal=True, key="login_mode")
             
             u_name = st.text_input("👤 Username", key="login_username")
             u_pass = st.text_input("🔑 Password", type='password', key="login_password")
             
             if mode == "New Registration":
-                st.info(f"🏫 Institution: Daffodils High School")
+                st.info(f"🏫 Institution: DAFFODILS HIGH SCHOOL")
                 secret_code = st.text_input("🔐 Institution Secret Code", type="password", key="reg_secret")
                 
                 role = st.selectbox("👔 Role", ["Teacher", "Student"], key="reg_role")
@@ -1397,7 +1422,7 @@ else:
     # Header
     col1, col2 = st.columns([3, 1])
     with col1:
-        st.markdown(f"### 📚 Daffodils High School")
+        st.markdown(f"### 📚 DAFFODILS HIGH SCHOOL")
         st.markdown(f"👋 **{st.session_state.user['name']}** | Role: **{st.session_state.user['role']}**")
         if st.session_state.user['role'] == "Student" and st.session_state.user['batch']:
             st.markdown(f"📚 Batch: **{st.session_state.user['batch']}**")
@@ -1412,6 +1437,8 @@ else:
             st.session_state.exam_end_time = None
             st.session_state.exam_auto_submitted = False
             st.session_state.timer_initialized = False
+            st.session_state.select_all_state = False
+            st.session_state.selected_pending_users = set()
             clear_cache()
             st.rerun()
     
@@ -1420,36 +1447,135 @@ else:
     user = st.session_state.user
     
     # ============================================
-    # ✅ OPTIMIZED: ADMIN PANEL WITH CACHING
+    # ✅ OPTIMIZED: ADMIN PANEL WITH CACHING AND FIXED APPROVALS
     # ============================================
     if user['role'] == "Admin":
         st.markdown(f"### 👑 Administration Panel")
         
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(["👥 Users", "✅ Approvals", "📝 Exams", "📊 Reports", "👨‍🏫 Teacher Batches"])
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["👥 Teachers", "👤 Students", "✅ Approvals", "📝 Exams", "📊 Reports"])
         
         with tab1:
-            st.markdown("#### 👥 All Users - Complete Details")
+            st.markdown("#### 👨‍🏫 Teachers - Complete Details")
             st.markdown("""
-            <div class="password-info">
-                ℹ️ Passwords are stored in encrypted format (SHA256 hash). 
-                Use this section to manage user accounts and reset passwords.
+            <div class="teacher-table">
+                ℹ️ All teacher accounts are listed below.
             </div>
             """, unsafe_allow_html=True)
             
-            # ✅ OPTIMIZED: Use cached users
-            users_data = get_cached_users(INSTITUTION_NAME)
+            # ✅ FIXED: Use cached teachers
+            teachers_data = get_cached_teachers(INSTITUTION_NAME)
             
-            if users_data:
-                users_df = pd.DataFrame(users_data)
-                if not users_df.empty:
+            if teachers_data:
+                teachers_df = pd.DataFrame(teachers_data)
+                if not teachers_df.empty:
                     # Add approval status column with badges
-                    users_df['approval_status'] = users_df['is_approved'].apply(
+                    teachers_df['approval_status'] = teachers_df['is_approved'].apply(
                         lambda x: '✅ Approved' if x else '⏳ Pending'
                     )
                     
-                    # Display complete user information
+                    # Display teacher information
                     st.dataframe(
-                        users_df[['username', 'role', 'batch_name', 'approval_status', 'created_at']],
+                        teachers_df[['username', 'role', 'batch_name', 'approval_status', 'created_at']],
+                        use_container_width=True,
+                        column_config={
+                            "username": "Username",
+                            "role": "Role",
+                            "batch_name": "Batches",
+                            "approval_status": "Approval Status",
+                            "created_at": "Registered On"
+                        }
+                    )
+                    
+                    # Password Management Section for Teachers
+                    st.markdown("#### 🔑 Teacher Password Management")
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.markdown("**Reset Teacher Password**")
+                        teacher_to_reset = st.selectbox(
+                            "Select Teacher", 
+                            teachers_df['username'].tolist(), 
+                            key="admin_reset_teacher"
+                        )
+                        
+                        new_password = st.text_input("New Password", type="password", key="new_teacher_pass")
+                        confirm_password = st.text_input("Confirm Password", type="password", key="confirm_teacher_pass")
+                        
+                        if st.button("🔄 Reset Teacher Password", key="reset_teacher_pass_btn"):
+                            if not new_password:
+                                st.error("❌ Please enter a new password")
+                            elif new_password != confirm_password:
+                                st.error("❌ Passwords do not match")
+                            else:
+                                try:
+                                    hashed_password = make_hash(new_password)
+                                    execute_query(
+                                        "UPDATE users SET password=%s WHERE username=%s AND institution_name=%s",
+                                        (hashed_password, teacher_to_reset, INSTITUTION_NAME),
+                                        fetch=False,
+                                        commit=True
+                                    )
+                                    st.success(f"✅ Password reset successfully for {teacher_to_reset}")
+                                    clear_cache()
+                                    time.sleep(1)
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"❌ Error resetting password: {str(e)}")
+                    
+                    with col2:
+                        st.markdown("**Generate Random Password**")
+                        if st.button("🎲 Generate Random Password", key="gen_teacher_pass"):
+                            random_pass = generate_random_password()
+                            st.info(f"Generated Password: `{random_pass}`")
+                            st.code(f"Copy this password: {random_pass}")
+                    
+                    st.divider()
+                    
+                    # Delete teacher option
+                    st.markdown("#### 🗑️ Delete Teacher")
+                    teacher_to_delete = st.selectbox(
+                        "Select Teacher to Delete", 
+                        teachers_df['username'].tolist(), 
+                        key="admin_delete_teacher"
+                    )
+                    
+                    col1, col2 = st.columns([1, 3])
+                    with col1:
+                        if st.button("🗑️ Delete Teacher", type="primary", key="admin_delete_teacher_btn"):
+                            try:
+                                execute_query("DELETE FROM users WHERE username=%s AND institution_name=%s", (teacher_to_delete, INSTITUTION_NAME), fetch=False, commit=True)
+                                execute_query("DELETE FROM teacher_batches WHERE teacher_username=%s AND institution_name=%s", (teacher_to_delete, INSTITUTION_NAME), fetch=False, commit=True)
+                                st.success(f"✅ {teacher_to_delete} deleted successfully")
+                                clear_cache()
+                                time.sleep(1)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ Error deleting teacher: {str(e)}")
+            else:
+                st.info("No teachers found")
+        
+        with tab2:
+            st.markdown("#### 👨‍🎓 Students - Complete Details")
+            st.markdown("""
+            <div class="student-table">
+                ℹ️ All student accounts are listed below.
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # ✅ FIXED: Use cached students
+            students_data = get_cached_students(INSTITUTION_NAME)
+            
+            if students_data:
+                students_df = pd.DataFrame(students_data)
+                if not students_df.empty:
+                    # Add approval status column with badges
+                    students_df['approval_status'] = students_df['is_approved'].apply(
+                        lambda x: '✅ Approved' if x else '⏳ Pending'
+                    )
+                    
+                    # Display student information
+                    st.dataframe(
+                        students_df[['username', 'role', 'batch_name', 'approval_status', 'created_at']],
                         use_container_width=True,
                         column_config={
                             "username": "Username",
@@ -1460,22 +1586,22 @@ else:
                         }
                     )
                     
-                    # Password Management Section
-                    st.markdown("#### 🔑 Password Management")
+                    # Password Management Section for Students
+                    st.markdown("#### 🔑 Student Password Management")
                     col1, col2 = st.columns(2)
                     
                     with col1:
-                        st.markdown("**Reset User Password**")
-                        user_to_reset = st.selectbox(
-                            "Select User", 
-                            users_df['username'].tolist(), 
-                            key="admin_reset_user"
+                        st.markdown("**Reset Student Password**")
+                        student_to_reset = st.selectbox(
+                            "Select Student", 
+                            students_df['username'].tolist(), 
+                            key="admin_reset_student"
                         )
                         
-                        new_password = st.text_input("New Password", type="password", key="new_pass")
-                        confirm_password = st.text_input("Confirm Password", type="password", key="confirm_pass")
+                        new_password = st.text_input("New Password", type="password", key="new_student_pass")
+                        confirm_password = st.text_input("Confirm Password", type="password", key="confirm_student_pass")
                         
-                        if st.button("🔄 Reset Password", key="reset_pass_btn"):
+                        if st.button("🔄 Reset Student Password", key="reset_student_pass_btn"):
                             if not new_password:
                                 st.error("❌ Please enter a new password")
                             elif new_password != confirm_password:
@@ -1485,11 +1611,11 @@ else:
                                     hashed_password = make_hash(new_password)
                                     execute_query(
                                         "UPDATE users SET password=%s WHERE username=%s AND institution_name=%s",
-                                        (hashed_password, user_to_reset, INSTITUTION_NAME),
+                                        (hashed_password, student_to_reset, INSTITUTION_NAME),
                                         fetch=False,
                                         commit=True
                                     )
-                                    st.success(f"✅ Password reset successfully for {user_to_reset}")
+                                    st.success(f"✅ Password reset successfully for {student_to_reset}")
                                     clear_cache()
                                     time.sleep(1)
                                     st.rerun()
@@ -1498,38 +1624,37 @@ else:
                     
                     with col2:
                         st.markdown("**Generate Random Password**")
-                        if st.button("🎲 Generate Random Password"):
+                        if st.button("🎲 Generate Random Password", key="gen_student_pass"):
                             random_pass = generate_random_password()
                             st.info(f"Generated Password: `{random_pass}`")
                             st.code(f"Copy this password: {random_pass}")
                     
                     st.divider()
                     
-                    # Delete user option
-                    st.markdown("#### 🗑️ Delete User")
-                    user_to_delete = st.selectbox(
-                        "Select User to Delete", 
-                        users_df['username'].tolist(), 
-                        key="admin_delete_user"
+                    # Delete student option
+                    st.markdown("#### 🗑️ Delete Student")
+                    student_to_delete = st.selectbox(
+                        "Select Student to Delete", 
+                        students_df['username'].tolist(), 
+                        key="admin_delete_student"
                     )
                     
                     col1, col2 = st.columns([1, 3])
                     with col1:
-                        if st.button("🗑️ Delete User", type="primary", key="admin_delete_btn"):
+                        if st.button("🗑️ Delete Student", type="primary", key="admin_delete_student_btn"):
                             try:
-                                execute_query("DELETE FROM users WHERE username=%s AND institution_name=%s", (user_to_delete, INSTITUTION_NAME), fetch=False, commit=True)
-                                execute_query("DELETE FROM results WHERE student=%s AND institution_name=%s", (user_to_delete, INSTITUTION_NAME), fetch=False, commit=True)
-                                execute_query("DELETE FROM teacher_batches WHERE teacher_username=%s AND institution_name=%s", (user_to_delete, INSTITUTION_NAME), fetch=False, commit=True)
-                                st.success(f"✅ {user_to_delete} deleted successfully")
+                                execute_query("DELETE FROM users WHERE username=%s AND institution_name=%s", (student_to_delete, INSTITUTION_NAME), fetch=False, commit=True)
+                                execute_query("DELETE FROM results WHERE student=%s AND institution_name=%s", (student_to_delete, INSTITUTION_NAME), fetch=False, commit=True)
+                                st.success(f"✅ {student_to_delete} deleted successfully")
                                 clear_cache()
                                 time.sleep(1)
                                 st.rerun()
                             except Exception as e:
-                                st.error(f"❌ Error deleting user: {str(e)}")
+                                st.error(f"❌ Error deleting student: {str(e)}")
             else:
-                st.info("No users found")
+                st.info("No students found")
         
-        with tab2:
+        with tab3:
             st.markdown("#### ✅ User Approvals")
             st.markdown("Approve or reject user registrations")
             
@@ -1564,8 +1689,12 @@ else:
                         if 'select_all_state' not in st.session_state:
                             st.session_state.select_all_state = False
                         
+                        # Create a container for the selection area
+                        st.markdown('<div class="selection-box">', unsafe_allow_html=True)
+                        
+                        # Select All checkbox
                         select_all = st.checkbox(
-                            "Select All Pending", 
+                            "✅ Select All Pending Users", 
                             key=select_all_key,
                             value=st.session_state.select_all_state
                         )
@@ -1573,46 +1702,87 @@ else:
                         # Update session state when select all changes
                         if select_all != st.session_state.select_all_state:
                             st.session_state.select_all_state = select_all
+                            # Update all checkboxes by rerunning
                             st.rerun()
                         
                         selected_users = []
-                        # Create a container for checkboxes
+                        
+                        # Create a container for checkboxes with unique keys
                         for idx, user_row in pending_users.iterrows():
                             checkbox_key = f"pending_{user_row['username']}_{idx}"
                             
-                            # If select all is checked, set default value to True
+                            # Determine if checkbox should be checked
                             if select_all:
-                                selected = st.checkbox(
-                                    f"{user_row['username']} ({user_row['role']}) - {user_row['batch_name'] if user_row['batch_name'] else 'N/A'}",
-                                    value=True,
-                                    key=checkbox_key
-                                )
+                                checked = True
+                            elif user_row['username'] in st.session_state.selected_pending_users:
+                                checked = True
                             else:
-                                selected = st.checkbox(
-                                    f"{user_row['username']} ({user_row['role']}) - {user_row['batch_name'] if user_row['batch_name'] else 'N/A'}",
-                                    key=checkbox_key
-                                )
+                                checked = False
+                            
+                            # Display checkbox
+                            selected = st.checkbox(
+                                f"👤 {user_row['username']} ({user_row['role']}) - {user_row['batch_name'] if user_row['batch_name'] else 'N/A'} [Registered: {format_timestamp(user_row['created_at'])}]",
+                                value=checked,
+                                key=checkbox_key
+                            )
+                            
+                            # Track selected users
                             if selected:
                                 selected_users.append(user_row['username'])
+                                st.session_state.selected_pending_users.add(user_row['username'])
+                            else:
+                                if user_row['username'] in st.session_state.selected_pending_users:
+                                    st.session_state.selected_pending_users.remove(user_row['username'])
                         
+                        st.markdown('</div>', unsafe_allow_html=True)
+                        
+                        # Display selected count
                         if selected_users:
-                            if st.button("✅ Approve Selected Users", use_container_width=True, key="approve_selected_btn"):
-                                try:
-                                    for username in selected_users:
-                                        execute_query(
-                                            "UPDATE users SET is_approved=TRUE WHERE username=%s AND institution_name=%s",
-                                            (username, INSTITUTION_NAME),
-                                            fetch=False,
-                                            commit=True
-                                        )
-                                    st.success(f"✅ Approved {len(selected_users)} user(s)")
-                                    clear_cache()
-                                    # Reset select all state
-                                    st.session_state.select_all_state = False
-                                    time.sleep(1)
-                                    st.rerun()
-                                except Exception as e:
-                                    st.error(f"❌ Error approving users: {str(e)}")
+                            st.info(f"📌 {len(selected_users)} user(s) selected")
+                            
+                            col_a, col_b = st.columns(2)
+                            with col_a:
+                                if st.button("✅ Approve Selected Users", use_container_width=True, key="approve_selected_btn"):
+                                    try:
+                                        for username in selected_users:
+                                            execute_query(
+                                                "UPDATE users SET is_approved=TRUE WHERE username=%s AND institution_name=%s",
+                                                (username, INSTITUTION_NAME),
+                                                fetch=False,
+                                                commit=True
+                                            )
+                                        st.success(f"✅ Approved {len(selected_users)} user(s)")
+                                        # Clear selections
+                                        st.session_state.select_all_state = False
+                                        st.session_state.selected_pending_users = set()
+                                        clear_cache()
+                                        time.sleep(1)
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error(f"❌ Error approving users: {str(e)}")
+                            
+                            with col_b:
+                                if st.button("❌ Reject Selected Users", use_container_width=True, key="reject_selected_btn"):
+                                    try:
+                                        for username in selected_users:
+                                            execute_query(
+                                                "DELETE FROM users WHERE username=%s AND institution_name=%s",
+                                                (username, INSTITUTION_NAME),
+                                                fetch=False,
+                                                commit=True
+                                            )
+                                        st.warning(f"⚠️ Rejected {len(selected_users)} user(s)")
+                                        # Clear selections
+                                        st.session_state.select_all_state = False
+                                        st.session_state.selected_pending_users = set()
+                                        clear_cache()
+                                        time.sleep(1)
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error(f"❌ Error rejecting users: {str(e)}")
+                        else:
+                            st.info("No users selected")
+                    
                     else:
                         st.info("No pending approvals")
                 
@@ -1620,23 +1790,80 @@ else:
                     st.markdown("**✅ Approved Users**")
                     if approved_users_data:
                         approved_users = pd.DataFrame(approved_users_data)
-                        for _, user_row in approved_users.iterrows():
-                            st.markdown(f"""
-                                <div style="padding: 5px; margin: 2px; background-color: #d4edda; border-radius: 5px;">
-                                    ✅ {user_row['username']} ({user_row['role']}) - {user_row['batch_name'] if user_row['batch_name'] else 'N/A'}
-                                </div>
-                            """, unsafe_allow_html=True)
                         
-                        # Bulk revoke option
+                        # Display approved users with checkboxes for revocation
+                        st.markdown('<div class="selection-box">', unsafe_allow_html=True)
+                        
+                        # Initialize session state for approved selections if not exists
+                        if 'selected_approved_users' not in st.session_state:
+                            st.session_state.selected_approved_users = set()
+                        
+                        # Select All for approved users
+                        select_all_approved = st.checkbox(
+                            "✅ Select All Approved Users", 
+                            key="select_all_approved"
+                        )
+                        
+                        selected_approved = []
+                        
+                        for idx, user_row in approved_users.iterrows():
+                            checkbox_key = f"approved_{user_row['username']}_{idx}"
+                            
+                            # Determine if checkbox should be checked
+                            if select_all_approved:
+                                checked = True
+                            elif user_row['username'] in st.session_state.selected_approved_users:
+                                checked = True
+                            else:
+                                checked = False
+                            
+                            # Display checkbox
+                            selected = st.checkbox(
+                                f"✅ {user_row['username']} ({user_row['role']}) - {user_row['batch_name'] if user_row['batch_name'] else 'N/A'}",
+                                value=checked,
+                                key=checkbox_key
+                            )
+                            
+                            if selected:
+                                selected_approved.append(user_row['username'])
+                                st.session_state.selected_approved_users.add(user_row['username'])
+                            else:
+                                if user_row['username'] in st.session_state.selected_approved_users:
+                                    st.session_state.selected_approved_users.remove(user_row['username'])
+                        
+                        st.markdown('</div>', unsafe_allow_html=True)
+                        
+                        if selected_approved:
+                            st.info(f"📌 {len(selected_approved)} user(s) selected")
+                            
+                            if st.button("🔄 Revoke Selected Approvals", use_container_width=True, key="revoke_selected_btn"):
+                                try:
+                                    for username in selected_approved:
+                                        execute_query(
+                                            "UPDATE users SET is_approved=FALSE WHERE username=%s AND institution_name=%s",
+                                            (username, INSTITUTION_NAME),
+                                            fetch=False,
+                                            commit=True
+                                        )
+                                    st.success(f"✅ Approval revoked for {len(selected_approved)} user(s)")
+                                    # Clear selections
+                                    st.session_state.selected_approved_users = set()
+                                    clear_cache()
+                                    time.sleep(1)
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"❌ Error revoking approvals: {str(e)}")
+                        
+                        # Individual revocation dropdown
                         st.markdown("---")
-                        st.markdown("**Revoke Approvals**")
+                        st.markdown("**Or Revoke Individually**")
                         revoke_user = st.selectbox(
                             "Select User to Revoke Approval",
                             approved_users['username'].tolist(),
                             key="revoke_user"
                         )
                         
-                        if st.button("🔄 Revoke Approval", use_container_width=True, key="revoke_btn"):
+                        if st.button("🔄 Revoke Individual Approval", use_container_width=True, key="revoke_btn"):
                             try:
                                 execute_query(
                                     "UPDATE users SET is_approved=FALSE WHERE username=%s AND institution_name=%s",
@@ -1656,7 +1883,7 @@ else:
             except Exception as e:
                 st.error(f"❌ Error loading approvals: {str(e)}")
       
-        with tab3:
+        with tab4:
             # ✅ OPTIMIZED: Cache exams with manual refresh
             exams_data = st.session_state.cached_data.get('admin_exams')
             
@@ -1694,7 +1921,7 @@ else:
             else:
                 st.info("No exams found")
         
-        with tab4:
+        with tab5:
             # ✅ OPTIMIZED: Cache results with manual refresh
             results_data = st.session_state.cached_data.get('admin_results')
             
@@ -1737,45 +1964,9 @@ else:
                     st.info("No results found")
             else:
                 st.info("No results found")
-        
-        with tab5:
-            st.markdown("### 👨‍🏫 Teacher Batches Management")
-            # ✅ OPTIMIZED: Cache teacher batches with manual refresh
-            teachers_data = st.session_state.cached_data.get('admin_teachers')
-            
-            col1, col2 = st.columns([3, 1])
-            with col2:
-                if st.button("🔄 Refresh Teachers", key="refresh_admin_teachers"):
-                    teachers_data = execute_query(
-                        "SELECT username FROM users WHERE role='Teacher' AND institution_name=%s",
-                        (INSTITUTION_NAME,)
-                    )
-                    st.session_state.cached_data['admin_teachers'] = teachers_data
-            
-            if teachers_data is None:
-                teachers_data = execute_query(
-                    "SELECT username FROM users WHERE role='Teacher' AND institution_name=%s",
-                    (INSTITUTION_NAME,)
-                )
-                st.session_state.cached_data['admin_teachers'] = teachers_data
-            
-            if teachers_data:
-                teachers_df = pd.DataFrame(teachers_data)
-                for teacher in teachers_df['username'].tolist():
-                    with st.expander(f"👨‍🏫 {teacher}"):
-                        # Get batches for this teacher
-                        batches_data = execute_query(
-                            "SELECT batch_name, created_at FROM teacher_batches WHERE teacher_username=%s AND institution_name=%s",
-                            (teacher, INSTITUTION_NAME)
-                        )
-                        if batches_data:
-                            batches_df = pd.DataFrame(batches_data)
-                            st.dataframe(batches_df, use_container_width=True)
-            else:
-                st.info("No teachers found")
     
     # ============================================
-    # ✅ OPTIMIZED: TEACHER PANEL WITH CACHING AND MANUAL REFRESH
+    # ✅ OPTIMIZED: TEACHER PANEL WITH CACHING AND FIXED FEATURES
     # ============================================
     elif user['role'] == "Teacher":
         st.markdown(f"### 👨‍🏫 Teacher Dashboard")
@@ -1925,40 +2116,22 @@ else:
                         questions = json.loads(exam['quiz_json'])
                         st.write(f"📊 Total Questions: {len(questions)}")
                         
-                        # ✅ NEW: Download Exam PDF button
-                        col1, col2 = st.columns([3, 1])
-                        with col2:
-                            if st.button("📥 Download Exam PDF", key=f"download_exam_{exam['id']}"):
-                                pdf = generate_exam_pdf(
-                                    teacher_name=exam['teacher'],
-                                    batch_name=exam['batch_name'],
-                                    subject=exam['subject'],
-                                    questions_data=questions,
-                                    institution_name=INSTITUTION_NAME
-                                )
-                                st.download_button(
-                                    "💾 Save PDF",
-                                    pdf,
-                                    f"{exam['subject']}_Exam_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                                    "application/pdf",
-                                    key=f"save_exam_pdf_{exam['id']}"
-                                )
-                        
-                        # Display all questions with answers
-                        for i, q in enumerate(questions):
-                            st.markdown(f"**Q{i+1}:** {q.get('question', 'N/A')}")
-                            
-                            # Show options for MCQ
-                            if q.get('options') and len(q['options']) > 0:
-                                options_text = ""
-                                for idx, opt in enumerate(q['options']):
-                                    options_text += f"{chr(65+idx)}. {opt}  "
-                                st.markdown(f"*Options:* {options_text}")
-                            
-                            st.markdown(f"*✅ Answer:* {q.get('answer', 'N/A')}")
-                            if q.get('explanation'):
-                                st.markdown(f"*💡 Explanation:* {q['explanation']}")
-                            st.markdown("---")
+                        # ✅ FIXED: Only show download button, no questions displayed
+                        if st.button("📥 Download Question Paper", key=f"download_exam_{exam['id']}"):
+                            pdf = generate_exam_pdf(
+                                teacher_name=exam['teacher'],
+                                batch_name=exam['batch_name'],
+                                subject=exam['subject'],
+                                questions_data=questions,
+                                institution_name=INSTITUTION_NAME
+                            )
+                            st.download_button(
+                                "💾 Save PDF",
+                                pdf,
+                                f"{exam['subject']}_Exam_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                                "application/pdf",
+                                key=f"save_exam_pdf_{exam['id']}"
+                            )
                         
                         # Delete button
                         if st.button("🗑️ Delete Exam", key=f"del_{exam['id']}"):
@@ -1985,31 +2158,34 @@ else:
                         st.cache_data.clear()
                         st.rerun()
                 
-                # Get results
+                # Get results with subject information
                 if selected_subject:
                     results_data = execute_query("""
-                        SELECT * FROM results 
-                        WHERE institution_name=%s
-                        AND exam_id IN (
-                            SELECT id FROM exams 
-                            WHERE batch_name=%s AND subject=%s
-                        )
-                        ORDER BY timestamp DESC
+                        SELECT r.*, e.subject as exam_subject 
+                        FROM results r
+                        JOIN exams e ON r.exam_id = e.id
+                        WHERE r.institution_name=%s
+                        AND e.batch_name=%s AND e.subject=%s
+                        ORDER BY r.timestamp DESC
                     """, (INSTITUTION_NAME, selected_batch, selected_subject))
                 else:
                     results_data = execute_query("""
-                        SELECT * FROM results 
-                        WHERE institution_name=%s
-                        AND exam_id IN (
-                            SELECT id FROM exams 
-                            WHERE batch_name=%s
-                        )
-                        ORDER BY timestamp DESC
+                        SELECT r.*, e.subject as exam_subject 
+                        FROM results r
+                        JOIN exams e ON r.exam_id = e.id
+                        WHERE r.institution_name=%s
+                        AND e.batch_name=%s
+                        ORDER BY r.timestamp DESC
                     """, (INSTITUTION_NAME, selected_batch))
                 
                 if results_data:
                     results = pd.DataFrame(results_data)
-                    st.dataframe(results[['student', 'subject', 'score', 'total', 'timestamp']], use_container_width=True)
+                    
+                    # ✅ FIXED: Display subject correctly in UI
+                    display_df = results[['student', 'exam_subject', 'score', 'total', 'timestamp']].copy()
+                    display_df.columns = ['Student', 'Subject', 'Score', 'Total', 'Date']
+                    
+                    st.dataframe(display_df, use_container_width=True)
                     
                     # Prepare data for PDF
                     pdf_data = []
@@ -2018,7 +2194,7 @@ else:
                             'student': r['student'],
                             'score': r['score'],
                             'total': r['total'],
-                            'subject': r['subject'],
+                            'subject': r['exam_subject'],  # ✅ FIXED: Use exam_subject
                             'date': format_timestamp(r['timestamp'])
                         })
                     
@@ -2235,7 +2411,7 @@ else:
                 time.sleep(1)
                 st.rerun()
         
-        # Show available exams - ✅ FIXED WITH PROPER IST TIME LOGIC AND SUBMISSION CHECK
+        # Show available exams - ✅ OPTIMIZED WITH CACHING
         else:
             st.markdown(f"### 🎓 Student Dashboard")
             
@@ -2249,74 +2425,70 @@ else:
                         st.cache_data.clear()
                         st.rerun()
                 
-                # ✅ FIXED: Use IST for date and time comparisons
-                now_ist = get_current_ist_time()
-                today_ist = now_ist.date()
-                
                 # ✅ OPTIMIZED: Use cached exams
-                exams_data = get_cached_student_exams(user['batch'], INSTITUTION_NAME, today_ist)
+                today = datetime.now().date()
+                exams_data = get_cached_student_exams(user['batch'], INSTITUTION_NAME, today)
                 
-                # ✅ FIXED: Get attempted exams and ensure they're properly filtered
+                # Get attempted exams
                 attempted_key = f"attempted_{user['name']}"
                 if attempted_key not in st.session_state.cached_data:
                     attempted_data = execute_query(
                         "SELECT exam_id FROM results WHERE student=%s",
                         (user['name'],)
                     )
-                    # Convert to set for faster lookups
                     st.session_state.cached_data[attempted_key] = set(row['exam_id'] for row in attempted_data) if attempted_data else set()
                 
                 attempted_ids = st.session_state.cached_data[attempted_key]
                 
                 if exams_data:
                     exams = pd.DataFrame(exams_data)
+                    current_time_obj = datetime.now().time()
                     
-                    # ✅ FIXED: Clear categorization based on IST and submission status
                     upcoming = []
                     available = []
-                    expired = []  # ✅ ADDED: For exams that have passed
+                    soon_exams = []
                     
                     for _, exam in exams.iterrows():
-                        # ✅ CRITICAL FIX: Skip if already attempted - this ensures submitted exams don't appear in Available
                         if exam['id'] in attempted_ids:
                             continue
                         
-                        # Parse exam date
                         if isinstance(exam['exam_date'], str):
                             exam_date = datetime.strptime(exam['exam_date'], '%Y-%m-%d').date()
                         else:
                             exam_date = exam['exam_date']
                         
-                        # Parse times
-                        if isinstance(exam['start_time'], str):
-                            start_time = datetime.strptime(exam['start_time'], '%H:%M:%S').time()
-                        else:
-                            start_time = exam['start_time']
-                        
-                        if isinstance(exam['end_time'], str):
-                            end_time = datetime.strptime(exam['end_time'], '%H:%M:%S').time()
-                        else:
-                            end_time = exam['end_time']
-                        
-                        # Create timezone-aware datetime objects in IST
-                        exam_start_datetime = IST.localize(datetime.combine(exam_date, start_time))
-                        exam_end_datetime = IST.localize(datetime.combine(exam_date, end_time))
-                        
-                        # ✅ FIXED: Apply correct logic with submission check already done above
-                        if now_ist < exam_start_datetime:
-                            # Future exam
-                            upcoming.append((exam, exam_start_datetime))
-                        elif exam_start_datetime <= now_ist <= exam_end_datetime:
-                            # Currently available - only reaches here if not attempted
-                            available.append((exam, exam_start_datetime, exam_end_datetime))
-                        elif now_ist > exam_end_datetime:
-                            # Expired exam
-                            expired.append((exam, exam_end_datetime))
+                        if exam_date > today:
+                            upcoming.append(exam)
+                        elif exam_date == today:
+                            start = exam['start_time']
+                            end = exam['end_time']
+                            
+                            if start and end:
+                                if isinstance(start, str):
+                                    start_time_obj = datetime.strptime(start, '%H:%M:%S').time()
+                                else:
+                                    start_time_obj = start
+                                
+                                if isinstance(end, str):
+                                    end_time_obj = datetime.strptime(end, '%H:%M:%S').time()
+                                else:
+                                    end_time_obj = end
+                                
+                                if current_time_obj < start_time_obj:
+                                    start_datetime = datetime.combine(exam_date, start_time_obj)
+                                    seconds_until = get_time_remaining_seconds(start_datetime)
+                                    
+                                    if seconds_until <= 900:  # 15 minutes
+                                        soon_exams.append((exam, start_datetime, seconds_until))
+                                    else:
+                                        upcoming.append(exam)
+                                elif start_time_obj <= current_time_obj <= end_time_obj:
+                                    available.append(exam)
                     
                     # Display Available Exams
                     if available:
                         st.markdown("### 📝 Available Now")
-                        for exam, start_dt, end_dt in available:
+                        for exam in available:
                             st.markdown(f"""
                                 <div class="available-exam">
                                     <b>{exam['subject']}</b><br>
@@ -2325,7 +2497,6 @@ else:
                                 </div>
                             """, unsafe_allow_html=True)
                             
-                            # ✅ FIXED: Show start button only for available exams
                             if st.button("🚀 Start Exam", key=f"start_{exam['id']}"):
                                 # Load questions and set end time properly
                                 st.session_state.active_exam = dict(exam)
@@ -2337,17 +2508,34 @@ else:
                                 
                                 st.rerun()
                     
-                    # Display Upcoming Exams
-                    if upcoming:
-                        st.markdown("### 📅 Upcoming Exams")
-                        for exam, start_dt in upcoming:
-                            # Calculate time until start for display
-                            seconds_until = get_time_remaining_seconds(start_dt)
+                    # Display Soon Exams
+                    if soon_exams:
+                        st.markdown("### ⏳ Starting Soon")
+                        for exam, start_datetime, seconds_until in soon_exams:
+                            current_seconds = get_time_remaining_seconds(start_datetime)
                             
-                            if seconds_until <= 900:  # 15 minutes or less
-                                # Show in special "Starting Soon" style
-                                mins = int(seconds_until // 60)
-                                secs = int(seconds_until % 60)
+                            if current_seconds <= 0:
+                                st.markdown(f"""
+                                    <div class="soon-exam">
+                                        <b>{exam['subject']}</b><br>
+                                        📅 Date: {exam['exam_date']} | ⏰ Time: {format_time(exam['start_time'])} - {format_time(exam['end_time'])}<br>
+                                        👨‍🏫 Teacher: {exam['teacher']}<br>
+                                        <span style="color: #4CAF50; font-weight: bold;">✅ Exam is ready to start!</span>
+                                    </div>
+                                """, unsafe_allow_html=True)
+                                
+                                if st.button("🚀 Click to Start Exam", key=f"start_soon_{exam['id']}"):
+                                    st.session_state.active_exam = dict(exam)
+                                    st.session_state.shuffled_qs = json.loads(exam['quiz_json'])
+                                    st.session_state.exam_answers = {}
+                                    st.session_state.answer_saved = {}
+                                    st.session_state.exam_auto_submitted = False
+                                    st.session_state.exam_end_time = None
+                                    
+                                    st.rerun()
+                            else:
+                                mins = int(current_seconds // 60)
+                                secs = int(current_seconds % 60)
                                 
                                 st.markdown(f"""
                                     <div class="soon-exam">
@@ -2357,31 +2545,21 @@ else:
                                         <span style="color: #ff9800; font-weight: bold;">⏰ Your exam will start in {mins} minute(s) {secs} second(s)!</span>
                                     </div>
                                 """, unsafe_allow_html=True)
-                            else:
-                                # Regular upcoming exam
-                                st.markdown(f"""
-                                    <div class="upcoming-exam">
-                                        <b>{exam['subject']}</b><br>
-                                        📅 Date: {exam['exam_date']} | ⏰ Time: {format_time(exam['start_time'])} - {format_time(exam['end_time'])}<br>
-                                        👨‍🏫 Teacher: {exam['teacher']}
-                                    </div>
-                                """, unsafe_allow_html=True)
                     
-                    # Display Expired Exams (optional, can be hidden if preferred)
-                    if expired and st.checkbox("Show Expired Exams", value=False):
-                        st.markdown("### ⏰ Expired Exams")
-                        for exam, end_dt in expired:
+                    # Display Upcoming Exams
+                    if upcoming:
+                        st.markdown("### 📅 Upcoming Exams")
+                        for exam in upcoming:
                             st.markdown(f"""
-                                <div class="expired-exam">
+                                <div class="upcoming-exam">
                                     <b>{exam['subject']}</b><br>
                                     📅 Date: {exam['exam_date']} | ⏰ Time: {format_time(exam['start_time'])} - {format_time(exam['end_time'])}<br>
-                                    👨‍🏫 Teacher: {exam['teacher']}<br>
-                                    <span style="color: #dc3545;">⏰ This exam has ended</span>
+                                    👨‍🏫 Teacher: {exam['teacher']}
                                 </div>
                             """, unsafe_allow_html=True)
                     
-                    if not upcoming and not available:
-                        st.info("📚 No exams scheduled for your batch")
+                    if not upcoming and not available and not soon_exams:
+                        st.info("🎉 No exams available at this time")
                 else:
                     st.info("📚 No exams scheduled for your batch")
             
@@ -2431,7 +2609,7 @@ else:
 
 st.markdown(f"""
     <div class="footer">
-        © {datetime.now().year} Daffodils High School AI Exam Portal | All Rights Reserved<br>
+        © {datetime.now().year} DAFFODILS HIGH SCHOOL AI Exam Portal | All Rights Reserved<br>
         Designed and Developed by <b> SVR COMPUTERS </b>
     </div>
 """, unsafe_allow_html=True)
