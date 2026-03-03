@@ -31,6 +31,7 @@ import traceback
 from datetime import datetime, timedelta
 import random
 import string
+import pytz
 
 # ============================================
 # 1. ENVIRONMENT CONFIGURATION
@@ -39,10 +40,13 @@ import string
 # Load environment variables
 load_dotenv()
 
-# Institution Configuration - UPDATED to DAFFODILS HIGH SCHOOL
+# Institution Configuration
 INSTITUTION_NAME = "DAFFODILS HIGH SCHOOL"
 INSTITUTION_SECRET = os.getenv("INSTITUTION_SECRET", os.getenv("SCHOOL_SECRET", "1234"))
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", os.getenv("SCHOOL_ADMIN_PASSWORD", "2109"))
+
+# IST Timezone
+IST = pytz.timezone('Asia/Kolkata')
 
 # Streamlit Page Config
 st.set_page_config(
@@ -55,7 +59,7 @@ st.set_page_config(
 # ✅ SESSION STATE INITIALIZATION - MUST BE FIRST
 # ============================================
 
-# Initialize all session state variables BEFORE any other code
+# Initialize all session state variables
 if 'user' not in st.session_state:
     st.session_state.user = None
 if 'active_exam' not in st.session_state:
@@ -80,26 +84,40 @@ if 'exam_start_time' not in st.session_state:
     st.session_state.exam_start_time = None
 if 'exam_submitted' not in st.session_state:
     st.session_state.exam_submitted = False
-# ✅ OPTIMIZED: Cache for heavy queries
 if 'cache_timestamp' not in st.session_state:
     st.session_state.cache_timestamp = 0
 if 'cached_data' not in st.session_state:
     st.session_state.cached_data = {}
-# ✅ OPTIMIZED: Exam questions cache
 if 'exam_questions_loaded' not in st.session_state:
     st.session_state.exam_questions_loaded = False
-# ✅ FIXED: ADD THESE NEW SESSION STATE VARIABLES FOR TIMER
 if 'exam_end_time' not in st.session_state:
     st.session_state.exam_end_time = None
 if 'exam_auto_submitted' not in st.session_state:
     st.session_state.exam_auto_submitted = False
 if 'timer_initialized' not in st.session_state:
     st.session_state.timer_initialized = False
-# ✅ NEW: For admin approval select all functionality
 if 'select_all_state' not in st.session_state:
     st.session_state.select_all_state = False
 if 'selected_pending_users' not in st.session_state:
     st.session_state.selected_pending_users = set()
+if 'exam_session_id' not in st.session_state:
+    st.session_state.exam_session_id = None
+if 'exam_logged' not in st.session_state:
+    st.session_state.exam_logged = False
+if 'processing_submit' not in st.session_state:
+    st.session_state.processing_submit = False
+if 'show_expired_exams' not in st.session_state:
+    st.session_state.show_expired_exams = False
+if 'selected_approved_users' not in st.session_state:
+    st.session_state.selected_approved_users = set()
+
+# ============================================
+# ✅ NEW: CASE-INSENSITIVE NORMALIZATION HELPER
+# ============================================
+
+def normalize_text(value):
+    """Normalize text for case-insensitive comparison"""
+    return value.strip().lower() if value and isinstance(value, str) else ""
 
 # ============================================
 # 2. GEMINI AI CONFIGURATION
@@ -117,7 +135,7 @@ except Exception as e:
     st.stop()
 
 # ============================================
-# ✅ OPTIMIZED FOR FREE TIER: DATABASE CONNECTION POOL
+# ✅ OPTIMIZED: DATABASE CONNECTION POOL
 # ============================================
 
 @st.cache_resource
@@ -129,17 +147,14 @@ def init_connection_pool():
             st.error("❌ NEON_DATABASE_URL not found in .env file!")
             return None
         
-        # For Neon, just use the URL as-is - they handle pooling automatically
-        # Remove any custom pooling parameters if present
         if '?' in DATABASE_URL:
             base_url = DATABASE_URL.split('?')[0]
         else:
             base_url = DATABASE_URL
         
-        # ✅ OPTIMIZED: minconn=1, maxconn=5 for free tier
         connection_pool = psycopg2.pool.SimpleConnectionPool(
             minconn=1,
-            maxconn=5,  # Reduced for free tier
+            maxconn=5,
             dsn=base_url,
             sslmode='require',
             connect_timeout=10
@@ -151,13 +166,18 @@ def init_connection_pool():
 
 connection_pool = init_connection_pool()
 
-# ✅ OPTIMIZED: Reusable execute_query function with better error handling
-def execute_query(query, params=None, fetch=True, commit=False, retry=2):
-    """Execute query with automatic connection management"""
+# ✅ OPTIMIZED: Reusable execute_query function with caching
+def execute_query(query, params=None, fetch=True, commit=False, retry=2, use_cache=False, cache_key=None):
+    """Execute query with automatic connection management and optional caching"""
     conn = None
     cur = None
     
-    # Check if pool exists
+    # Check cache first if requested
+    if use_cache and cache_key and cache_key in st.session_state.cached_data:
+        cache_time, cache_result = st.session_state.cached_data[cache_key]
+        if time.time() - cache_time < 30:  # 30 second cache
+            return cache_result
+    
     if not connection_pool:
         st.error("❌ Database connection pool not initialized")
         return None if fetch else False
@@ -182,6 +202,10 @@ def execute_query(query, params=None, fetch=True, commit=False, retry=2):
             if commit:
                 conn.commit()
             
+            # Cache result if requested
+            if use_cache and cache_key and fetch:
+                st.session_state.cached_data[cache_key] = (time.time(), result)
+            
             return result
             
         except Exception as e:
@@ -190,7 +214,7 @@ def execute_query(query, params=None, fetch=True, commit=False, retry=2):
             if attempt == retry - 1:
                 st.error(f"❌ Database error: {str(e)}")
                 return None if fetch else False
-            time.sleep(0.1 * (attempt + 1))  # Exponential backoff
+            time.sleep(0.1 * (attempt + 1))
             
         finally:
             if cur:
@@ -199,10 +223,10 @@ def execute_query(query, params=None, fetch=True, commit=False, retry=2):
                 try:
                     connection_pool.putconn(conn)
                 except:
-                    pass  # Connection might be already closed
+                    pass
 
 # ============================================
-# ✅ OPTIMIZED: Database initialization with better error handling
+# ✅ OPTIMIZED: Database initialization
 # ============================================
 
 def init_database():
@@ -284,6 +308,19 @@ def init_database():
             )
         """)
         
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS exam_sessions (
+                id SERIAL PRIMARY KEY,
+                student VARCHAR(255) NOT NULL,
+                exam_id INTEGER NOT NULL,
+                session_id VARCHAR(100) NOT NULL,
+                start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                status VARCHAR(50) DEFAULT 'in_progress',
+                UNIQUE(student, exam_id)
+            )
+        """)
+        
         conn.commit()
         print("✅ Database initialized successfully")
         
@@ -333,7 +370,6 @@ def generate_random_password(length=8):
 def get_gemini_model():
     """Initialize Gemini AI model with correct model names - without sidebar messages"""
     try:
-        # Try different model names that work in 2024
         model_names = [
             'models/gemini-1.5-flash-001',
             'models/gemini-1.5-flash',
@@ -345,7 +381,6 @@ def get_gemini_model():
         for model_name in model_names:
             try:
                 model = genai.GenerativeModel(model_name)
-                # Test the model
                 response = model.generate_content(
                     "Say 'OK'", 
                     generation_config={
@@ -358,7 +393,6 @@ def get_gemini_model():
             except Exception as e:
                 continue
         
-        # If none work, list available models (no sidebar display)
         models = genai.list_models()
         available_models = []
         for m in models:
@@ -385,21 +419,16 @@ def register_indic_fonts():
     """Register fonts for Indian languages to fix box issue"""
     registered_fonts = {'telugu': None, 'hindi': None, 'fallback': 'Helvetica'}
     
-    # On Windows, use system fonts
     if platform.system() == 'Windows':
         windows_fonts_dir = "C:\\Windows\\Fonts"
         
-        # Map of font files to language and font name
         font_candidates = [
-            # Telugu fonts
             {'file': 'gautami.ttf', 'name': 'Gautami', 'lang': 'telugu'},
             {'file': 'GautamiB.ttf', 'name': 'GautamiB', 'lang': 'telugu'},
             {'file': 'Nirmala.ttf', 'name': 'Nirmala', 'lang': 'both'},
             {'file': 'NirmalaB.ttf', 'name': 'NirmalaB', 'lang': 'both'},
-            # Hindi/Devanagari fonts
             {'file': 'mangal.ttf', 'name': 'Mangal', 'lang': 'hindi'},
             {'file': 'MangalB.ttf', 'name': 'MangalB', 'lang': 'hindi'},
-            # Fallback
             {'file': 'arial.ttf', 'name': 'Arial', 'lang': 'fallback'},
         ]
         
@@ -424,25 +453,21 @@ def register_indic_fonts():
     
     return registered_fonts
 
-# Register fonts
 INDIC_FONTS = register_indic_fonts()
 
 def is_telugu_text(text):
-    """Check if text contains Telugu characters"""
     if not isinstance(text, str):
         return False
     telugu_pattern = re.compile(r'[\u0C00-\u0C7F]')
     return bool(telugu_pattern.search(text))
 
 def is_hindi_text(text):
-    """Check if text contains Hindi/Devanagari characters"""
     if not isinstance(text, str):
         return False
     hindi_pattern = re.compile(r'[\u0900-\u097F]')
     return bool(hindi_pattern.search(text))
 
 def get_appropriate_font(text):
-    """Return the appropriate font name based on text content"""
     if not isinstance(text, str):
         return 'Helvetica'
     
@@ -454,9 +479,7 @@ def get_appropriate_font(text):
         return 'Helvetica'
 
 class MultiLingualParagraph(Paragraph):
-    """Custom paragraph class that handles multilingual text"""
     def __init__(self, text, style, **kw):
-        # Auto-detect language and set appropriate font
         font_name = get_appropriate_font(text)
         
         custom_style = ParagraphStyle(
@@ -467,22 +490,19 @@ class MultiLingualParagraph(Paragraph):
             encoding='utf-8'
         )
         
-        # Clean the text to remove any box characters
         if isinstance(text, str):
-            text = re.sub(r'■', '', text)  # Remove box characters
+            text = re.sub(r'■', '', text)
             text = text.encode('utf-8', 'ignore').decode('utf-8')
         
         super().__init__(text, custom_style, **kw)
 
 def generate_student_pdf(student_name, exam_subject, score, total, review_data, batch_name="", institution_name=INSTITUTION_NAME):
-    """Generate PDF report for student"""
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
     
     elements = []
     
-    # Title
     title_style = ParagraphStyle(
         'CustomTitle',
         parent=styles['Heading1'],
@@ -497,7 +517,6 @@ def generate_student_pdf(student_name, exam_subject, score, total, review_data, 
     elements.append(MultiLingualParagraph(f"Student Exam Report", styles['Heading2']))
     elements.append(Spacer(1, 10))
     
-    # Student Details
     details = [
         ["Student Name:", student_name],
         ["Batch/Class:", batch_name],
@@ -518,7 +537,6 @@ def generate_student_pdf(student_name, exam_subject, score, total, review_data, 
     elements.append(detail_table)
     elements.append(Spacer(1, 20))
     
-    # Questions and Answers
     for i, item in enumerate(review_data, 1):
         q_style = ParagraphStyle(
             'Question',
@@ -529,27 +547,27 @@ def generate_student_pdf(student_name, exam_subject, score, total, review_data, 
             fontName='Helvetica'
         )
         
-        # Question
         elements.append(MultiLingualParagraph(f"<b>Q{i}:</b> {item['question']}", q_style))
         
-        # Options if available
         if item.get('options') and len(item['options']) > 0:
             options_text = "<b>Options:</b> "
             for idx, opt in enumerate(item['options']):
                 options_text += f"{chr(65+idx)}. {opt}  "
             elements.append(MultiLingualParagraph(options_text, q_style))
         
-        # Answers
         is_correct = str(item['user_ans']).lower().strip() == str(item['correct_ans']).lower().strip()
         answer_color = 'green' if is_correct else 'red'
         
-        elements.append(MultiLingualParagraph(f"<b>Your Answer:</b> <font color='{answer_color}'>{item['user_ans']}</font>", q_style))
+        user_answer_display = item['user_ans'] if item['user_ans'] and str(item['user_ans']).strip() != "" else "Not Attempted"
+        if user_answer_display == "Not Attempted":
+            answer_color = 'red'
+        
+        elements.append(MultiLingualParagraph(f"<b>Your Answer:</b> <font color='{answer_color}'>{user_answer_display}</font>", q_style))
         elements.append(MultiLingualParagraph(f"<b>Correct Answer:</b> <font color='green'>{item['correct_ans']}</font>", q_style))
         elements.append(MultiLingualParagraph(f"<b>Explanation:</b> {item['explanation']}", q_style))
-        elements.append(MultiLingualParagraph(f"<b>Status:</b> {'✓ Correct' if is_correct else '✗ Incorrect'}", q_style))
+        elements.append(MultiLingualParagraph(f"<b>Status:</b> {'✓ Correct' if is_correct else '✗ Incorrect' if item['user_ans'] and str(item['user_ans']).strip() != '' else '✗ Not Attempted'}", q_style))
         elements.append(Spacer(1, 10))
     
-    # Footer
     footer_style = ParagraphStyle(
         'Footer',
         parent=styles['Normal'],
@@ -565,14 +583,12 @@ def generate_student_pdf(student_name, exam_subject, score, total, review_data, 
     return buffer.getvalue()
 
 def generate_teacher_pdf(teacher_name, class_name, subject, results_data, institution_name=INSTITUTION_NAME):
-    """Generate PDF report for teacher"""
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
     
     elements = []
     
-    # Title
     title_style = ParagraphStyle(
         'CustomTitle',
         parent=styles['Heading1'],
@@ -587,7 +603,6 @@ def generate_teacher_pdf(teacher_name, class_name, subject, results_data, instit
     elements.append(MultiLingualParagraph(f"Class Performance Report", styles['Heading2']))
     elements.append(Spacer(1, 10))
     
-    # Teacher Details
     details = [
         ["Teacher:", teacher_name],
         ["Class/Batch:", class_name],
@@ -608,7 +623,6 @@ def generate_teacher_pdf(teacher_name, class_name, subject, results_data, instit
     elements.append(detail_table)
     elements.append(Spacer(1, 20))
     
-    # Results Table
     if results_data:
         table_data = [["S.No", "Student Name", "Subject", "Score", "Total", "Percentage", "Date"]]
         
@@ -617,7 +631,7 @@ def generate_teacher_pdf(teacher_name, class_name, subject, results_data, instit
             table_data.append([
                 str(idx),
                 row['student'],
-                row['subject'],  # ✅ FIXED: Subject is now displayed
+                row['subject'],
                 str(row['score']),
                 str(row['total']),
                 f"{percentage}%",
@@ -635,14 +649,12 @@ def generate_teacher_pdf(teacher_name, class_name, subject, results_data, instit
         ]))
         elements.append(results_table)
         
-        # Summary
         avg_score = sum(r['score'] for r in results_data) / len(results_data)
         avg_percentage = int((avg_score / results_data[0]['total']) * 100)
         
         elements.append(Spacer(1, 20))
         elements.append(MultiLingualParagraph(f"<b>Class Average:</b> {avg_percentage}%", styles['Normal']))
     
-    # Footer
     footer_style = ParagraphStyle(
         'Footer',
         parent=styles['Normal'],
@@ -657,14 +669,12 @@ def generate_teacher_pdf(teacher_name, class_name, subject, results_data, instit
     return buffer.getvalue()
 
 def generate_exam_pdf(teacher_name, batch_name, subject, questions_data, institution_name=INSTITUTION_NAME):
-    """Generate PDF of exam questions and answers for teacher"""
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
     
     elements = []
     
-    # Title
     title_style = ParagraphStyle(
         'CustomTitle',
         parent=styles['Heading1'],
@@ -679,7 +689,6 @@ def generate_exam_pdf(teacher_name, batch_name, subject, questions_data, institu
     elements.append(MultiLingualParagraph(f"Exam Questions - {subject}", styles['Heading2']))
     elements.append(Spacer(1, 10))
     
-    # Exam Details
     details = [
         ["Teacher:", teacher_name],
         ["Batch/Class:", batch_name],
@@ -700,7 +709,6 @@ def generate_exam_pdf(teacher_name, batch_name, subject, questions_data, institu
     elements.append(detail_table)
     elements.append(Spacer(1, 20))
     
-    # Questions and Answers
     for i, q in enumerate(questions_data, 1):
         q_style = ParagraphStyle(
             'Question',
@@ -711,24 +719,20 @@ def generate_exam_pdf(teacher_name, batch_name, subject, questions_data, institu
             fontName='Helvetica'
         )
         
-        # Question
         elements.append(MultiLingualParagraph(f"<b>Q{i}:</b> {q.get('question', 'N/A')}", q_style))
         
-        # Options if available
         if q.get('options') and len(q['options']) > 0:
             options_text = "<b>Options:</b> "
             for idx, opt in enumerate(q['options']):
                 options_text += f"{chr(65+idx)}. {opt}  "
             elements.append(MultiLingualParagraph(options_text, q_style))
         
-        # Answer and Explanation
         elements.append(MultiLingualParagraph(f"<b>Answer:</b> <font color='green'>{q.get('answer', 'N/A')}</font>", q_style))
         if q.get('explanation'):
             elements.append(MultiLingualParagraph(f"<b>Explanation:</b> {q['explanation']}", q_style))
         
         elements.append(Spacer(1, 15))
     
-    # Footer
     footer_style = ParagraphStyle(
         'Footer',
         parent=styles['Normal'],
@@ -747,7 +751,6 @@ def generate_exam_pdf(teacher_name, batch_name, subject, questions_data, institu
 # ============================================
 
 def extract_text_from_pdf(pdf_bytes):
-    """Extract text from PDF"""
     try:
         pdf_file = io.BytesIO(pdf_bytes)
         pdf_reader = PyPDF2.PdfReader(pdf_file)
@@ -759,14 +762,12 @@ def extract_text_from_pdf(pdf_bytes):
         return ""
 
 def convert_pdf_to_images(pdf_bytes):
-    """Convert PDF to images"""
     try:
         return convert_from_bytes(pdf_bytes)
     except:
         return []
 
 def process_uploaded_files(files):
-    """Process multiple uploaded files and return combined content for AI"""
     all_content = []
     all_text = ""
     all_images = []
@@ -776,7 +777,6 @@ def process_uploaded_files(files):
             st.info(f"Processing file {idx+1}: {file.name}")
             
             if file.type == "application/pdf":
-                # Try text extraction first
                 pdf_text = extract_text_from_pdf(file.read())
                 file.seek(0)
                 
@@ -784,14 +784,12 @@ def process_uploaded_files(files):
                     all_text += f"\n\n--- Content from PDF {idx+1}: {file.name} ---\n{pdf_text}"
                     st.success(f"✅ Extracted text from {file.name}")
                 else:
-                    # Fall back to images
                     images = convert_pdf_to_images(file.read())
                     file.seek(0)
                     if images:
-                        all_images.extend(images[:2])  # Limit to 2 pages per PDF
+                        all_images.extend(images[:2])
                         st.success(f"✅ Converted {file.name} to {len(images[:2])} images")
             else:
-                # Image file
                 img = PIL.Image.open(file)
                 all_images.append(img)
                 st.success(f"✅ Loaded image: {file.name}")
@@ -799,7 +797,6 @@ def process_uploaded_files(files):
         except Exception as e:
             st.warning(f"⚠️ Could not process file {file.name}: {str(e)}")
     
-    # Combine all content
     if all_text:
         all_content.append(all_text)
     if all_images:
@@ -808,168 +805,267 @@ def process_uploaded_files(files):
     return all_content
 
 # ============================================
-# ✅ OPTIMIZED: Caching helper functions - MUST BE BEFORE LOGIN PAGE
+# ✅ OPTIMIZED: Caching helper functions with case-insensitive updates
 # ============================================
 
 @st.cache_data(ttl=60, max_entries=10)
 def get_cached_users(institution_name):
-    """Cache users data for 60 seconds"""
     return execute_query(
-        "SELECT username, role, batch_name, is_approved, created_at FROM users WHERE institution_name=%s ORDER BY created_at DESC",
+        "SELECT username, role, batch_name, is_approved, created_at FROM users WHERE LOWER(institution_name)=LOWER(%s) ORDER BY created_at DESC",
         (institution_name,)
     )
 
-# ✅ NEW: Get cached teachers only
 @st.cache_data(ttl=60, max_entries=10)
 def get_cached_teachers(institution_name):
-    """Cache teachers data for 60 seconds"""
     return execute_query(
-        "SELECT username, role, batch_name, is_approved, created_at FROM users WHERE institution_name=%s AND role='Teacher' ORDER BY created_at DESC",
+        "SELECT username, role, batch_name, is_approved, created_at FROM users WHERE LOWER(institution_name)=LOWER(%s) AND LOWER(role)='teacher' ORDER BY created_at DESC",
         (institution_name,)
     )
 
-# ✅ NEW: Get cached students only
 @st.cache_data(ttl=60, max_entries=10)
 def get_cached_students(institution_name):
-    """Cache students data for 60 seconds"""
     return execute_query(
-        "SELECT username, role, batch_name, is_approved, created_at FROM users WHERE institution_name=%s AND role='Student' ORDER BY created_at DESC",
+        "SELECT username, role, batch_name, is_approved, created_at FROM users WHERE LOWER(institution_name)=LOWER(%s) AND LOWER(role)='student' ORDER BY created_at DESC",
         (institution_name,)
     )
 
 @st.cache_data(ttl=120, max_entries=20)
 def get_cached_exams(teacher_name, institution_name):
-    """Cache teacher exams for 120 seconds"""
     return execute_query(
-        "SELECT * FROM exams WHERE teacher=%s AND institution_name=%s ORDER BY created_at DESC",
+        "SELECT * FROM exams WHERE LOWER(teacher)=LOWER(%s) AND LOWER(institution_name)=LOWER(%s) ORDER BY created_at DESC",
         (teacher_name, institution_name)
     )
 
 @st.cache_data(ttl=60, max_entries=10)
 def get_cached_batches(teacher_name, institution_name):
-    """Cache teacher batches for 60 seconds"""
     return execute_query(
-        "SELECT batch_name FROM teacher_batches WHERE teacher_username=%s AND institution_name=%s",
+        "SELECT batch_name FROM teacher_batches WHERE LOWER(teacher_username)=LOWER(%s) AND LOWER(institution_name)=LOWER(%s)",
         (teacher_name, institution_name)
     )
 
-@st.cache_data(ttl=30, max_entries=50)
-def get_cached_student_exams(batch_name, institution_name, today):
-    """Cache student exams for 30 seconds"""
-    return execute_query(
-        "SELECT * FROM exams WHERE batch_name=%s AND institution_name=%s AND exam_date >= %s ORDER BY exam_date, start_time",
-        (batch_name, institution_name, today)
+# ✅ OPTIMIZED: Student exams with case-insensitive batch matching
+def get_student_exams(batch_name, institution_name):
+    """Get exams for student with caching and case-insensitive batch matching"""
+    cache_key = f"student_exams_{normalize_text(batch_name)}_{normalize_text(institution_name)}"
+    today = datetime.now().date()
+    
+    result = execute_query(
+        "SELECT * FROM exams WHERE LOWER(batch_name)=LOWER(%s) AND LOWER(institution_name)=LOWER(%s) AND exam_date >= %s ORDER BY exam_date, start_time",
+        (batch_name, institution_name, today),
+        use_cache=True,
+        cache_key=cache_key
     )
+    return result if result else []
 
-@st.cache_data(ttl=60, max_entries=50)
-def get_cached_results(student_name, institution_name):
-    """Cache student results for 60 seconds"""
-    return execute_query(
-        "SELECT * FROM results WHERE student=%s AND institution_name=%s ORDER BY timestamp DESC",
-        (student_name, institution_name)
+# ✅ FIXED: Get student results with case-insensitive matching
+def get_student_results(student_name, institution_name):
+    """Get student results with caching and case-insensitive matching"""
+    cache_key = f"student_results_{normalize_text(student_name)}_{normalize_text(institution_name)}"
+    
+    result = execute_query(
+        "SELECT * FROM results WHERE LOWER(student)=LOWER(%s) AND LOWER(institution_name)=LOWER(%s) ORDER BY timestamp DESC",
+        (student_name, institution_name),
+        use_cache=True,
+        cache_key=cache_key
     )
+    return result if result else []
+
+# ✅ FIXED: Get attempted exam IDs with case-insensitive student name
+def get_attempted_exam_ids(student_name):
+    """Get set of exam IDs that student has already taken with case-insensitive matching"""
+    cache_key = f"attempted_{normalize_text(student_name)}"
+    
+    result = execute_query(
+        "SELECT exam_id FROM results WHERE LOWER(student)=LOWER(%s)",
+        (student_name,),
+        use_cache=True,
+        cache_key=cache_key
+    )
+    return set(row['exam_id'] for row in result) if result else set()
 
 def clear_cache():
-    """Clear all cached data"""
     st.cache_data.clear()
     st.session_state.cache_timestamp = time.time()
     st.session_state.cached_data = {}
 
 # ============================================
-# ✅ PATCH: Timer Management for Auto-Submit
+# ✅ FIXED: Timer Management with Power Failure Handling
 # ============================================
 
-def auto_submit_exam():
-    """
-    Core auto-submit logic - checks if time expired and processes submission
-    Returns True if auto-submit was triggered, False otherwise
-    """
-    # Check if we're in an active exam and not already submitted
-    if not st.session_state.active_exam or st.session_state.exam_auto_submitted or st.session_state.exam_result:
-        return False
+def log_exam_session(student_name, exam_id):
+    """Log exam session for power failure recovery with case-insensitive student name"""
+    if st.session_state.exam_logged:
+        return
     
-    # Get end time
-    if st.session_state.exam_end_time is None:
-        return False
+    session_id = f"{student_name}_{exam_id}_{int(time.time())}"
     
-    # Check if time expired
-    remaining_seconds = int(st.session_state.exam_end_time - time.time())
-    if remaining_seconds > 0:
-        return False
-    
-    # TIME EXPIRED - Process auto-submit
-    st.session_state.exam_auto_submitted = True
-    
-    # Calculate score
-    score = 0
-    review = []
-    
-    for i, q in enumerate(st.session_state.shuffled_qs):
-        user_ans = str(st.session_state.exam_answers.get(str(i), "")).strip()
-        correct_ans = str(q.get('answer', '')).strip()
-        
-        if user_ans and user_ans.lower() == correct_ans.lower():
-            score += 1
-        
-        review.append({
-            "question": q['question'],
-            "user_ans": user_ans if user_ans else "Not answered",
-            "correct_ans": correct_ans,
-            "options": q.get('options', []),
-            "explanation": q.get('explanation', 'No explanation available')
-        })
-    
-    # Save to database
     execute_query(
-        "INSERT INTO results (student, exam_id, score, total, subject, review_json, institution_name) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-        (st.session_state.user['name'], st.session_state.active_exam['id'], score, len(review), 
-         st.session_state.active_exam['subject'], json.dumps(review), INSTITUTION_NAME),
+        """
+        INSERT INTO exam_sessions (student, exam_id, session_id, status)
+        VALUES (%s, %s, %s, 'in_progress')
+        ON CONFLICT (student, exam_id) 
+        DO UPDATE SET session_id = EXCLUDED.session_id, last_active = CURRENT_TIMESTAMP, status = 'in_progress'
+        """,
+        (student_name, exam_id, session_id),
         fetch=False,
         commit=True
     )
     
-    # Set result - CRITICAL: Keep active_exam until result is displayed
-    st.session_state.exam_result = {
-        "score": score,
-        "total": len(review),
-        "subject": st.session_state.active_exam['subject'],
-        "review": review
-    }
+    st.session_state.exam_session_id = session_id
+    st.session_state.exam_logged = True
+
+def check_exam_session(student_name, exam_id):
+    """Check if exam session exists and is valid with case-insensitive student name"""
+    result = execute_query(
+        "SELECT status FROM exam_sessions WHERE LOWER(student)=LOWER(%s) AND exam_id=%s",
+        (student_name, exam_id)
+    )
+    return result[0]['status'] if result else None
+
+def complete_exam_session(student_name, exam_id):
+    """Mark exam session as completed with case-insensitive student name"""
+    execute_query(
+        "UPDATE exam_sessions SET status='completed' WHERE LOWER(student)=LOWER(%s) AND exam_id=%s",
+        (student_name, exam_id),
+        fetch=False,
+        commit=True
+    )
+
+def auto_submit_exam():
+    """
+    Core auto-submit logic with power failure handling
+    Returns True if auto-submit was triggered, False otherwise
+    """
+    if not st.session_state.active_exam or st.session_state.exam_auto_submitted or st.session_state.exam_result:
+        return False
     
-    return True
+    if st.session_state.exam_end_time is None:
+        return False
+    
+    remaining_seconds = int(st.session_state.exam_end_time - time.time())
+    if remaining_seconds > 0:
+        return False
+    
+    # Prevent duplicate processing
+    if st.session_state.processing_submit:
+        return True
+    
+    st.session_state.processing_submit = True
+    
+    try:
+        # Check if result already exists (prevents duplicate on power failure) with case-insensitive matching
+        existing = execute_query(
+            "SELECT id FROM results WHERE LOWER(student)=LOWER(%s) AND exam_id=%s",
+            (st.session_state.user['name'], st.session_state.active_exam['id'])
+        )
+        
+        if existing:
+            # Result already exists - just load it
+            result_data = execute_query(
+                "SELECT * FROM results WHERE LOWER(student)=LOWER(%s) AND exam_id=%s",
+                (st.session_state.user['name'], st.session_state.active_exam['id'])
+            )[0]
+            
+            st.session_state.exam_result = {
+                "score": result_data['score'],
+                "total": result_data['total'],
+                "subject": result_data['subject'],
+                "review": json.loads(result_data['review_json'])
+            }
+            
+            st.session_state.exam_auto_submitted = True
+            return True
+        
+        st.session_state.exam_auto_submitted = True
+        
+        score = 0
+        review = []
+        
+        for i, q in enumerate(st.session_state.shuffled_qs):
+            user_ans = str(st.session_state.exam_answers.get(str(i), "")).strip()
+            correct_ans = str(q.get('answer', '')).strip()
+            
+            if user_ans and user_ans != "" and user_ans.lower() == correct_ans.lower():
+                score += 1
+            
+            review.append({
+                "question": q['question'],
+                "user_ans": user_ans if user_ans else "",
+                "correct_ans": correct_ans,
+                "options": q.get('options', []),
+                "explanation": q.get('explanation', 'No explanation available')
+            })
+        
+        execute_query(
+            "INSERT INTO results (student, exam_id, score, total, subject, review_json, institution_name) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (st.session_state.user['name'], st.session_state.active_exam['id'], score, len(review), 
+             st.session_state.active_exam['subject'], json.dumps(review), INSTITUTION_NAME),
+            fetch=False,
+            commit=True
+        )
+        
+        # Mark session as completed
+        complete_exam_session(st.session_state.user['name'], st.session_state.active_exam['id'])
+        
+        # Clear cache for this student
+        cache_key = f"attempted_{normalize_text(st.session_state.user['name'])}"
+        if cache_key in st.session_state.cached_data:
+            del st.session_state.cached_data[cache_key]
+        
+        st.session_state.exam_result = {
+            "score": score,
+            "total": len(review),
+            "subject": st.session_state.active_exam['subject'],
+            "review": review
+        }
+        
+        return True
+    finally:
+        st.session_state.processing_submit = False
 
 def initialize_exam_timer():
-    """Initialize exam end time based on exam schedule"""
     if st.session_state.exam_end_time is not None or st.session_state.exam_auto_submitted:
         return
     
     exam = st.session_state.active_exam
-    exam_duration = 3600  # Default 1 hour
+    exam_duration = 3600
     
     if exam.get('start_time') and exam.get('end_time') and exam.get('exam_date'):
         try:
-            # Parse exam date
             if isinstance(exam['exam_date'], str):
                 exam_date = datetime.strptime(exam['exam_date'], '%Y-%m-%d').date()
             else:
                 exam_date = exam['exam_date']
             
-            # Parse end time
             if isinstance(exam['end_time'], str):
                 end_time = datetime.strptime(exam['end_time'], '%H:%M:%S').time()
             else:
                 end_time = exam['end_time']
             
             end_datetime = datetime.combine(exam_date, end_time)
+            # Localize to IST
+            end_datetime = IST.localize(end_datetime)
             st.session_state.exam_end_time = end_datetime.timestamp()
         except Exception as e:
-            # Fallback to default duration
             st.session_state.exam_end_time = time.time() + exam_duration
     else:
         st.session_state.exam_end_time = time.time() + exam_duration
 
 # ============================================
-# 10. STYLING - UPDATED WITH NEW REQUIREMENTS
+# ✅ NEW: Time input dropdown function for IST
+# ============================================
+
+def get_time_from_dropdown(hour, minute, am_pm):
+    """Convert dropdown selections to time object in IST"""
+    try:
+        time_str = f"{hour}:{minute:02d} {am_pm}"
+        time_obj = datetime.strptime(time_str, "%I:%M %p").time()
+        return time_obj
+    except Exception as e:
+        return None
+
+# ============================================
+# 10. STYLING
 # ============================================
 
 st.markdown("""
@@ -994,7 +1090,6 @@ st.markdown("""
         text-align: center; 
         margin-bottom: 20px;
     }
-    /* UPDATED FOOTER - More attractive gradient */
     .footer {
         position: fixed; 
         left: 0; 
@@ -1090,6 +1185,21 @@ st.markdown("""
         margin-bottom: 10px;
         border-left: 5px solid #ff9800;
     }
+    .expired-exam {
+        background-color: #ffebee;
+        padding: 15px;
+        border-radius: 10px;
+        margin-bottom: 10px;
+        border-left: 5px solid #f44336;
+        opacity: 0.8;
+    }
+    .completed-exam {
+        background-color: #e8f5e8;
+        padding: 15px;
+        border-radius: 10px;
+        margin-bottom: 10px;
+        border-left: 5px solid #4caf50;
+    }
     .start-button {
         background-color: #4CAF50;
         color: white;
@@ -1108,7 +1218,6 @@ st.markdown("""
         background-color: #cccccc;
         cursor: not-allowed;
     }
-    /* NEW STYLES FOR SCROLLABLE LOGIN PAGE */
     .scrollable-content {
         max-height: 500px;
         overflow-y: auto;
@@ -1130,7 +1239,6 @@ st.markdown("""
     .scrollable-content::-webkit-scrollbar-thumb:hover {
         background: #ff8c42;
     }
-    /* Support message style */
     .support-message {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         color: white;
@@ -1149,11 +1257,9 @@ st.markdown("""
     .support-message a:hover {
         text-decoration: underline;
     }
-    /* Hide Streamlit branding */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
-    /* Admin users table style */
     .users-table {
         font-size: 14px;
         margin-bottom: 20px;
@@ -1181,7 +1287,6 @@ st.markdown("""
         font-weight: bold;
         display: inline-block;
     }
-    /* NEW: Teacher and Student table styles */
     .teacher-table {
         background-color: #e3f2fd;
         padding: 15px;
@@ -1194,7 +1299,6 @@ st.markdown("""
         border-radius: 10px;
         margin-bottom: 20px;
     }
-    /* Selection box style */
     .selection-box {
         background-color: #fff;
         border: 2px solid #FF6B35;
@@ -1202,10 +1306,29 @@ st.markdown("""
         padding: 15px;
         margin: 10px 0;
     }
+    .batch-edit-box {
+        background-color: #e8f4fd;
+        border-left: 5px solid #2196f3;
+        padding: 15px;
+        border-radius: 10px;
+        margin: 15px 0;
+    }
+    .expired-exam-tick {
+        color: #4caf50;
+        font-weight: bold;
+        margin-left: 10px;
+    }
+    .time-dropdown-container {
+        background-color: #f8f9fa;
+        padding: 15px;
+        border-radius: 10px;
+        border: 1px solid #dee2e6;
+        margin-bottom: 10px;
+    }
     </style>
     """, unsafe_allow_html=True)
 
-# Display Header - UPDATED with DAFFODILS HIGH SCHOOL
+# Display Header
 st.markdown(f'<p class="main-header">📚 AI SMART EXAM PORTAL</p>', unsafe_allow_html=True)
 st.markdown(f'<p class="institution-name">🏫 DAFFODILS HIGH SCHOOL</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-header">AI-Powered Examination System for All Educational Institutions</p>', unsafe_allow_html=True)
@@ -1215,7 +1338,6 @@ st.markdown('<p class="sub-header">AI-Powered Examination System for All Educati
 # ============================================
 
 def parse_time_input(time_str):
-    """Parse time string"""
     if not time_str:
         return None
     try:
@@ -1227,7 +1349,6 @@ def parse_time_input(time_str):
             return None
 
 def format_time(time_obj):
-    """Format time for display"""
     if not time_obj:
         return "Not set"
     try:
@@ -1238,7 +1359,6 @@ def format_time(time_obj):
         return str(time_obj)
 
 def format_timestamp(ts):
-    """Format timestamp safely"""
     if ts is None:
         return "Unknown date"
     try:
@@ -1251,14 +1371,33 @@ def format_timestamp(ts):
         return "Unknown date"
 
 def get_time_remaining_seconds(target_datetime):
-    """Get seconds remaining until target datetime"""
-    now = datetime.now()
+    now = datetime.now(IST)
     if target_datetime > now:
         return int((target_datetime - now).total_seconds())
     return 0
 
+# ✅ FIXED: Check if exam is expired using IST
+def is_exam_expired(exam):
+    """Check if exam end time has passed using IST"""
+    try:
+        if isinstance(exam['exam_date'], str):
+            exam_date = datetime.strptime(exam['exam_date'], '%Y-%m-%d').date()
+        else:
+            exam_date = exam['exam_date']
+        
+        if isinstance(exam['end_time'], str):
+            end_time = datetime.strptime(exam['end_time'], '%H:%M:%S').time()
+        else:
+            end_time = exam['end_time']
+        
+        end_datetime = datetime.combine(exam_date, end_time)
+        end_datetime = IST.localize(end_datetime)
+        return datetime.now(IST) > end_datetime
+    except:
+        return False
+
 # ============================================
-# 13. LOGIN PAGE - UPDATED WITH APPROVAL CHECK
+# 13. LOGIN PAGE (with case-insensitive username)
 # ============================================
 
 if st.session_state.user is None:
@@ -1277,11 +1416,9 @@ if st.session_state.user is None:
                  use_container_width=True)
     
     with col2:
-        # UPDATED: Admin tab now shows only icon without text
-        tab_login, tab_admin = st.tabs(["🔐", "👑"])  # Only icons, no text
+        tab_login, tab_admin = st.tabs(["🔐", "👑"])
         
         with tab_login:
-            # UPDATED: Added scrollable container
             st.markdown('<div class="scrollable-content">', unsafe_allow_html=True)
             
             st.markdown(f"### 📝 Login to DAFFODILS HIGH SCHOOL")
@@ -1320,9 +1457,29 @@ if st.session_state.user is None:
                         st.error("❌ At least one batch/class is required")
                     else:
                         try:
+                            # Check if username already exists (case-insensitive)
+                            existing_user = execute_query(
+                                "SELECT username FROM users WHERE LOWER(username)=LOWER(%s) AND LOWER(institution_name)=LOWER(%s)",
+                                (u_name, INSTITUTION_NAME)
+                            )
+                            
+                            if existing_user:
+                                st.error("❌ Username already exists (case-insensitive)!")
+                                st.stop()
+                            
                             hashed_password = make_hash(u_pass)
                             
                             if role == "Student":
+                                # Check if batch already exists for any teacher (case-insensitive)
+                                # This is just for information, not blocking
+                                existing_batch = execute_query(
+                                    "SELECT batch_name FROM teacher_batches WHERE LOWER(batch_name)=LOWER(%s) AND LOWER(institution_name)=LOWER(%s)",
+                                    (batch_name, INSTITUTION_NAME)
+                                )
+                                
+                                if existing_batch:
+                                    st.info(f"ℹ️ Note: Batch/Class '{batch_name}' already exists (case-insensitive).")
+                                
                                 execute_query(
                                     'INSERT INTO users (username, password, role, batch_name, institution_name, is_approved) VALUES (%s, %s, %s, %s, %s, %s)',
                                     (u_name, hashed_password, role, batch_name.strip(), INSTITUTION_NAME, False),
@@ -1337,13 +1494,23 @@ if st.session_state.user is None:
                                     commit=True
                                 )
                                 
+                                # Check for duplicate batches (case-insensitive) before inserting
                                 for batch in [b.strip() for b in teacher_batches.split(',') if b.strip()]:
-                                    execute_query(
-                                        'INSERT INTO teacher_batches (teacher_username, batch_name, institution_name) VALUES (%s, %s, %s)',
-                                        (u_name, batch, INSTITUTION_NAME),
-                                        fetch=False,
-                                        commit=True
+                                    # Case-insensitive duplicate check
+                                    duplicate = execute_query(
+                                        "SELECT 1 FROM teacher_batches WHERE LOWER(teacher_username)=LOWER(%s) AND LOWER(batch_name)=LOWER(%s) AND LOWER(institution_name)=LOWER(%s)",
+                                        (u_name, batch, INSTITUTION_NAME)
                                     )
+                                    
+                                    if duplicate:
+                                        st.warning(f"⚠️ Batch '{batch}' already exists (case-insensitive) for this teacher. Skipping duplicate.")
+                                    else:
+                                        execute_query(
+                                            'INSERT INTO teacher_batches (teacher_username, batch_name, institution_name) VALUES (%s, %s, %s)',
+                                            (u_name, batch, INSTITUTION_NAME),
+                                            fetch=False,
+                                            commit=True
+                                        )
                             
                             st.success(f"✅ Account created! Please wait for admin approval before logging in.")
                             time.sleep(2)
@@ -1354,14 +1521,15 @@ if st.session_state.user is None:
                         except Exception as e:
                             st.error(f"❌ Error: {str(e)}")
             
-            else:  # Login
+            else:
                 if st.button("🔓 Login", type="primary", use_container_width=True, key="login_btn"):
                     if not u_name or not u_pass:
                         st.error("❌ Please enter username and password")
                     else:
                         try:
+                            # ✅ FIXED: Case-insensitive login
                             user = execute_query(
-                                'SELECT * FROM users WHERE username=%s AND institution_name=%s', 
+                                'SELECT * FROM users WHERE LOWER(username)=LOWER(%s) AND LOWER(institution_name)=LOWER(%s)', 
                                 (u_name, INSTITUTION_NAME)
                             )
                             
@@ -1370,12 +1538,12 @@ if st.session_state.user is None:
                                 if user['password'] == make_hash(u_pass):
                                     if user.get('is_approved', True):
                                         st.session_state.user = {
-                                            "name": user['username'],
+                                            "name": user['username'],  # Store original case for display
                                             "role": user['role'],
                                             "batch": user['batch_name'],
                                             "institution": user['institution_name']
                                         }
-                                        st.success(f"✅ Welcome {u_name}!")
+                                        st.success(f"✅ Welcome {user['username']}!")
                                         time.sleep(1)
                                         st.rerun()
                                     else:
@@ -1387,7 +1555,6 @@ if st.session_state.user is None:
                         except Exception as e:
                             st.error(f"❌ Login error: {str(e)}")
             
-            # UPDATED: Support message inside scrollable area
             st.markdown("""
                 <div class="support-message">
                     📞 For Application support, please call us @ 
@@ -1396,7 +1563,7 @@ if st.session_state.user is None:
                 </div>
             """, unsafe_allow_html=True)
             
-            st.markdown('</div>', unsafe_allow_html=True)  # Close scrollable div
+            st.markdown('</div>', unsafe_allow_html=True)
         
         with tab_admin:
             st.markdown(f"### 👑 Admin Access")
@@ -1415,11 +1582,10 @@ if st.session_state.user is None:
                     st.error("❌ Invalid password")
 
 # ============================================
-# 14. MAIN APPLICATION - OPTIMIZED WITH CACHING
+# 14. MAIN APPLICATION
 # ============================================
 
 else:
-    # Header
     col1, col2 = st.columns([3, 1])
     with col1:
         st.markdown(f"### 📚 DAFFODILS HIGH SCHOOL")
@@ -1428,7 +1594,6 @@ else:
             st.markdown(f"📚 Batch: **{st.session_state.user['batch']}**")
     with col2:
         if st.button("🚪 Logout", key="logout_btn"):
-            # Clear all session state on logout
             st.session_state.user = None
             st.session_state.active_exam = None
             st.session_state.exam_result = None
@@ -1439,6 +1604,10 @@ else:
             st.session_state.timer_initialized = False
             st.session_state.select_all_state = False
             st.session_state.selected_pending_users = set()
+            st.session_state.exam_session_id = None
+            st.session_state.exam_logged = False
+            st.session_state.processing_submit = False
+            st.session_state.show_expired_exams = False
             clear_cache()
             st.rerun()
     
@@ -1447,7 +1616,7 @@ else:
     user = st.session_state.user
     
     # ============================================
-    # ✅ OPTIMIZED: ADMIN PANEL WITH CACHING AND FIXED APPROVALS
+    # ✅ OPTIMIZED: ADMIN PANEL (with case-insensitive updates)
     # ============================================
     if user['role'] == "Admin":
         st.markdown(f"### 👑 Administration Panel")
@@ -1462,18 +1631,15 @@ else:
             </div>
             """, unsafe_allow_html=True)
             
-            # ✅ FIXED: Use cached teachers
             teachers_data = get_cached_teachers(INSTITUTION_NAME)
             
             if teachers_data:
                 teachers_df = pd.DataFrame(teachers_data)
                 if not teachers_df.empty:
-                    # Add approval status column with badges
                     teachers_df['approval_status'] = teachers_df['is_approved'].apply(
                         lambda x: '✅ Approved' if x else '⏳ Pending'
                     )
                     
-                    # Display teacher information
                     st.dataframe(
                         teachers_df[['username', 'role', 'batch_name', 'approval_status', 'created_at']],
                         use_container_width=True,
@@ -1486,7 +1652,93 @@ else:
                         }
                     )
                     
-                    # Password Management Section for Teachers
+                    # ✅ FIXED: Batch Edit Option for Teachers with case-insensitive duplicate check
+                    st.markdown("#### ✏️ Edit Teacher Batches")
+                    st.markdown('<div class="batch-edit-box">', unsafe_allow_html=True)
+                    
+                    teacher_to_edit = st.selectbox(
+                        "Select Teacher to Edit Batches", 
+                        teachers_df['username'].tolist(), 
+                        key="admin_edit_teacher"
+                    )
+                    
+                    # Get current batches (case-insensitive check not needed for display)
+                    current_batches_data = execute_query(
+                        "SELECT batch_name FROM teacher_batches WHERE LOWER(teacher_username)=LOWER(%s) AND LOWER(institution_name)=LOWER(%s)",
+                        (teacher_to_edit, INSTITUTION_NAME)
+                    )
+                    current_batches = [b['batch_name'] for b in current_batches_data] if current_batches_data else []
+                    
+                    st.info(f"Current Batches: {', '.join(current_batches) if current_batches else 'None'}")
+                    
+                    new_batches = st.text_input(
+                        "Enter New Batches (comma separated)", 
+                        value=", ".join(current_batches) if current_batches else "",
+                        placeholder="e.g., 10A,10B,MPC,BPC",
+                        key="teacher_new_batches"
+                    )
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("💾 Update Batches", use_container_width=True, key="update_teacher_batches"):
+                            try:
+                                # Delete old batches (case-insensitive)
+                                execute_query(
+                                    "DELETE FROM teacher_batches WHERE LOWER(teacher_username)=LOWER(%s) AND LOWER(institution_name)=LOWER(%s)",
+                                    (teacher_to_edit, INSTITUTION_NAME),
+                                    fetch=False,
+                                    commit=True
+                                )
+                                
+                                # Insert new batches with duplicate check
+                                if new_batches.strip():
+                                    duplicate_found = False
+                                    for batch in [b.strip() for b in new_batches.split(',') if b.strip()]:
+                                        # Check for duplicates among themselves (case-insensitive)
+                                        normalized_batches = [normalize_text(b) for b in [b.strip() for b in new_batches.split(',') if b.strip()]]
+                                        if len(normalized_batches) != len(set(normalized_batches)):
+                                            st.error("❌ Duplicate batches found in your input (case-insensitive)!")
+                                            duplicate_found = True
+                                            break
+                                        
+                                        # Check against existing batches for this teacher (though we just deleted, but for safety)
+                                        duplicate = execute_query(
+                                            "SELECT 1 FROM teacher_batches WHERE LOWER(teacher_username)=LOWER(%s) AND LOWER(batch_name)=LOWER(%s) AND LOWER(institution_name)=LOWER(%s)",
+                                            (teacher_to_edit, batch, INSTITUTION_NAME)
+                                        )
+                                        
+                                        if duplicate:
+                                            st.error(f"❌ Batch '{batch}' already exists (case-insensitive)!")
+                                            duplicate_found = True
+                                            break
+                                        
+                                        execute_query(
+                                            'INSERT INTO teacher_batches (teacher_username, batch_name, institution_name) VALUES (%s, %s, %s)',
+                                            (teacher_to_edit, batch, INSTITUTION_NAME),
+                                            fetch=False,
+                                            commit=True
+                                        )
+                                    
+                                    if not duplicate_found:
+                                        st.success(f"✅ Batches updated for {teacher_to_edit}")
+                                        clear_cache()
+                                        time.sleep(1)
+                                        st.rerun()
+                                else:
+                                    st.success(f"✅ All batches removed for {teacher_to_edit}")
+                                    clear_cache()
+                                    time.sleep(1)
+                                    st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ Error updating batches: {str(e)}")
+                    
+                    with col2:
+                        if st.button("🔄 Reset", use_container_width=True, key="reset_batches"):
+                            st.rerun()
+                    
+                    st.markdown('</div>', unsafe_allow_html=True)
+                    
+                    # Password Management Section
                     st.markdown("#### 🔑 Teacher Password Management")
                     col1, col2 = st.columns(2)
                     
@@ -1510,7 +1762,7 @@ else:
                                 try:
                                     hashed_password = make_hash(new_password)
                                     execute_query(
-                                        "UPDATE users SET password=%s WHERE username=%s AND institution_name=%s",
+                                        "UPDATE users SET password=%s WHERE LOWER(username)=LOWER(%s) AND LOWER(institution_name)=LOWER(%s)",
                                         (hashed_password, teacher_to_reset, INSTITUTION_NAME),
                                         fetch=False,
                                         commit=True
@@ -1531,7 +1783,6 @@ else:
                     
                     st.divider()
                     
-                    # Delete teacher option
                     st.markdown("#### 🗑️ Delete Teacher")
                     teacher_to_delete = st.selectbox(
                         "Select Teacher to Delete", 
@@ -1543,8 +1794,8 @@ else:
                     with col1:
                         if st.button("🗑️ Delete Teacher", type="primary", key="admin_delete_teacher_btn"):
                             try:
-                                execute_query("DELETE FROM users WHERE username=%s AND institution_name=%s", (teacher_to_delete, INSTITUTION_NAME), fetch=False, commit=True)
-                                execute_query("DELETE FROM teacher_batches WHERE teacher_username=%s AND institution_name=%s", (teacher_to_delete, INSTITUTION_NAME), fetch=False, commit=True)
+                                execute_query("DELETE FROM users WHERE LOWER(username)=LOWER(%s) AND LOWER(institution_name)=LOWER(%s)", (teacher_to_delete, INSTITUTION_NAME), fetch=False, commit=True)
+                                execute_query("DELETE FROM teacher_batches WHERE LOWER(teacher_username)=LOWER(%s) AND LOWER(institution_name)=LOWER(%s)", (teacher_to_delete, INSTITUTION_NAME), fetch=False, commit=True)
                                 st.success(f"✅ {teacher_to_delete} deleted successfully")
                                 clear_cache()
                                 time.sleep(1)
@@ -1562,18 +1813,15 @@ else:
             </div>
             """, unsafe_allow_html=True)
             
-            # ✅ FIXED: Use cached students
             students_data = get_cached_students(INSTITUTION_NAME)
             
             if students_data:
                 students_df = pd.DataFrame(students_data)
                 if not students_df.empty:
-                    # Add approval status column with badges
                     students_df['approval_status'] = students_df['is_approved'].apply(
                         lambda x: '✅ Approved' if x else '⏳ Pending'
                     )
                     
-                    # Display student information
                     st.dataframe(
                         students_df[['username', 'role', 'batch_name', 'approval_status', 'created_at']],
                         use_container_width=True,
@@ -1586,7 +1834,6 @@ else:
                         }
                     )
                     
-                    # Password Management Section for Students
                     st.markdown("#### 🔑 Student Password Management")
                     col1, col2 = st.columns(2)
                     
@@ -1610,7 +1857,7 @@ else:
                                 try:
                                     hashed_password = make_hash(new_password)
                                     execute_query(
-                                        "UPDATE users SET password=%s WHERE username=%s AND institution_name=%s",
+                                        "UPDATE users SET password=%s WHERE LOWER(username)=LOWER(%s) AND LOWER(institution_name)=LOWER(%s)",
                                         (hashed_password, student_to_reset, INSTITUTION_NAME),
                                         fetch=False,
                                         commit=True
@@ -1631,7 +1878,6 @@ else:
                     
                     st.divider()
                     
-                    # Delete student option
                     st.markdown("#### 🗑️ Delete Student")
                     student_to_delete = st.selectbox(
                         "Select Student to Delete", 
@@ -1643,8 +1889,8 @@ else:
                     with col1:
                         if st.button("🗑️ Delete Student", type="primary", key="admin_delete_student_btn"):
                             try:
-                                execute_query("DELETE FROM users WHERE username=%s AND institution_name=%s", (student_to_delete, INSTITUTION_NAME), fetch=False, commit=True)
-                                execute_query("DELETE FROM results WHERE student=%s AND institution_name=%s", (student_to_delete, INSTITUTION_NAME), fetch=False, commit=True)
+                                execute_query("DELETE FROM users WHERE LOWER(username)=LOWER(%s) AND LOWER(institution_name)=LOWER(%s)", (student_to_delete, INSTITUTION_NAME), fetch=False, commit=True)
+                                execute_query("DELETE FROM results WHERE LOWER(student)=LOWER(%s) AND LOWER(institution_name)=LOWER(%s)", (student_to_delete, INSTITUTION_NAME), fetch=False, commit=True)
                                 st.success(f"✅ {student_to_delete} deleted successfully")
                                 clear_cache()
                                 time.sleep(1)
@@ -1659,19 +1905,17 @@ else:
             st.markdown("Approve or reject user registrations")
             
             try:
-                # Get pending users
                 pending_users_data = execute_query("""
                     SELECT username, role, batch_name, created_at 
                     FROM users 
-                    WHERE institution_name=%s AND is_approved=FALSE 
+                    WHERE LOWER(institution_name)=LOWER(%s) AND is_approved=FALSE 
                     ORDER BY created_at ASC
                 """, (INSTITUTION_NAME,))
                 
-                # Get approved users
                 approved_users_data = execute_query("""
                     SELECT username, role, batch_name, created_at 
                     FROM users 
-                    WHERE institution_name=%s AND is_approved=TRUE 
+                    WHERE LOWER(institution_name)=LOWER(%s) AND is_approved=TRUE 
                     ORDER BY created_at DESC
                 """, (INSTITUTION_NAME,))
                 
@@ -1685,74 +1929,68 @@ else:
                         # ✅ FIXED: Select all checkbox with proper state management
                         select_all_key = "select_all_pending"
                         
-                        # Initialize session state for select all if not exists
                         if 'select_all_state' not in st.session_state:
                             st.session_state.select_all_state = False
                         
-                        # Create a container for the selection area
                         st.markdown('<div class="selection-box">', unsafe_allow_html=True)
                         
-                        # Select All checkbox
+                        # Simple checkbox that triggers on change
                         select_all = st.checkbox(
                             "✅ Select All Pending Users", 
                             key=select_all_key,
                             value=st.session_state.select_all_state
                         )
                         
-                        # Update session state when select all changes
+                        # Update state without immediate rerun
                         if select_all != st.session_state.select_all_state:
                             st.session_state.select_all_state = select_all
-                            # Update all checkboxes by rerunning
+                            if select_all:
+                                # Select all users
+                                st.session_state.selected_pending_users = set(pending_users['username'].tolist())
+                            else:
+                                # Deselect all
+                                st.session_state.selected_pending_users = set()
                             st.rerun()
                         
                         selected_users = []
                         
-                        # Create a container for checkboxes with unique keys
                         for idx, user_row in pending_users.iterrows():
                             checkbox_key = f"pending_{user_row['username']}_{idx}"
                             
                             # Determine if checkbox should be checked
-                            if select_all:
-                                checked = True
-                            elif user_row['username'] in st.session_state.selected_pending_users:
-                                checked = True
-                            else:
-                                checked = False
+                            is_checked = user_row['username'] in st.session_state.selected_pending_users
                             
-                            # Display checkbox
                             selected = st.checkbox(
                                 f"👤 {user_row['username']} ({user_row['role']}) - {user_row['batch_name'] if user_row['batch_name'] else 'N/A'} [Registered: {format_timestamp(user_row['created_at'])}]",
-                                value=checked,
+                                value=is_checked,
                                 key=checkbox_key
                             )
                             
-                            # Track selected users
                             if selected:
                                 selected_users.append(user_row['username'])
-                                st.session_state.selected_pending_users.add(user_row['username'])
+                                if user_row['username'] not in st.session_state.selected_pending_users:
+                                    st.session_state.selected_pending_users.add(user_row['username'])
                             else:
                                 if user_row['username'] in st.session_state.selected_pending_users:
                                     st.session_state.selected_pending_users.remove(user_row['username'])
                         
                         st.markdown('</div>', unsafe_allow_html=True)
                         
-                        # Display selected count
-                        if selected_users:
-                            st.info(f"📌 {len(selected_users)} user(s) selected")
+                        if st.session_state.selected_pending_users:
+                            st.info(f"📌 {len(st.session_state.selected_pending_users)} user(s) selected")
                             
                             col_a, col_b = st.columns(2)
                             with col_a:
                                 if st.button("✅ Approve Selected Users", use_container_width=True, key="approve_selected_btn"):
                                     try:
-                                        for username in selected_users:
+                                        for username in st.session_state.selected_pending_users:
                                             execute_query(
-                                                "UPDATE users SET is_approved=TRUE WHERE username=%s AND institution_name=%s",
+                                                "UPDATE users SET is_approved=TRUE WHERE LOWER(username)=LOWER(%s) AND LOWER(institution_name)=LOWER(%s)",
                                                 (username, INSTITUTION_NAME),
                                                 fetch=False,
                                                 commit=True
                                             )
-                                        st.success(f"✅ Approved {len(selected_users)} user(s)")
-                                        # Clear selections
+                                        st.success(f"✅ Approved {len(st.session_state.selected_pending_users)} user(s)")
                                         st.session_state.select_all_state = False
                                         st.session_state.selected_pending_users = set()
                                         clear_cache()
@@ -1764,15 +2002,14 @@ else:
                             with col_b:
                                 if st.button("❌ Reject Selected Users", use_container_width=True, key="reject_selected_btn"):
                                     try:
-                                        for username in selected_users:
+                                        for username in st.session_state.selected_pending_users:
                                             execute_query(
-                                                "DELETE FROM users WHERE username=%s AND institution_name=%s",
+                                                "DELETE FROM users WHERE LOWER(username)=LOWER(%s) AND LOWER(institution_name)=LOWER(%s)",
                                                 (username, INSTITUTION_NAME),
                                                 fetch=False,
                                                 commit=True
                                             )
-                                        st.warning(f"⚠️ Rejected {len(selected_users)} user(s)")
-                                        # Clear selections
+                                        st.warning(f"⚠️ Rejected {len(st.session_state.selected_pending_users)} user(s)")
                                         st.session_state.select_all_state = False
                                         st.session_state.selected_pending_users = set()
                                         clear_cache()
@@ -1791,36 +2028,30 @@ else:
                     if approved_users_data:
                         approved_users = pd.DataFrame(approved_users_data)
                         
-                        # Display approved users with checkboxes for revocation
                         st.markdown('<div class="selection-box">', unsafe_allow_html=True)
                         
-                        # Initialize session state for approved selections if not exists
                         if 'selected_approved_users' not in st.session_state:
                             st.session_state.selected_approved_users = set()
                         
-                        # Select All for approved users
                         select_all_approved = st.checkbox(
                             "✅ Select All Approved Users", 
                             key="select_all_approved"
                         )
+                        
+                        if select_all_approved:
+                            st.session_state.selected_approved_users = set(approved_users['username'].tolist())
+                            st.rerun()
                         
                         selected_approved = []
                         
                         for idx, user_row in approved_users.iterrows():
                             checkbox_key = f"approved_{user_row['username']}_{idx}"
                             
-                            # Determine if checkbox should be checked
-                            if select_all_approved:
-                                checked = True
-                            elif user_row['username'] in st.session_state.selected_approved_users:
-                                checked = True
-                            else:
-                                checked = False
+                            is_checked = user_row['username'] in st.session_state.selected_approved_users
                             
-                            # Display checkbox
                             selected = st.checkbox(
                                 f"✅ {user_row['username']} ({user_row['role']}) - {user_row['batch_name'] if user_row['batch_name'] else 'N/A'}",
-                                value=checked,
+                                value=is_checked,
                                 key=checkbox_key
                             )
                             
@@ -1833,20 +2064,19 @@ else:
                         
                         st.markdown('</div>', unsafe_allow_html=True)
                         
-                        if selected_approved:
-                            st.info(f"📌 {len(selected_approved)} user(s) selected")
+                        if st.session_state.selected_approved_users:
+                            st.info(f"📌 {len(st.session_state.selected_approved_users)} user(s) selected")
                             
                             if st.button("🔄 Revoke Selected Approvals", use_container_width=True, key="revoke_selected_btn"):
                                 try:
-                                    for username in selected_approved:
+                                    for username in st.session_state.selected_approved_users:
                                         execute_query(
-                                            "UPDATE users SET is_approved=FALSE WHERE username=%s AND institution_name=%s",
+                                            "UPDATE users SET is_approved=FALSE WHERE LOWER(username)=LOWER(%s) AND LOWER(institution_name)=LOWER(%s)",
                                             (username, INSTITUTION_NAME),
                                             fetch=False,
                                             commit=True
                                         )
-                                    st.success(f"✅ Approval revoked for {len(selected_approved)} user(s)")
-                                    # Clear selections
+                                    st.success(f"✅ Approval revoked for {len(st.session_state.selected_approved_users)} user(s)")
                                     st.session_state.selected_approved_users = set()
                                     clear_cache()
                                     time.sleep(1)
@@ -1854,7 +2084,6 @@ else:
                                 except Exception as e:
                                     st.error(f"❌ Error revoking approvals: {str(e)}")
                         
-                        # Individual revocation dropdown
                         st.markdown("---")
                         st.markdown("**Or Revoke Individually**")
                         revoke_user = st.selectbox(
@@ -1866,7 +2095,7 @@ else:
                         if st.button("🔄 Revoke Individual Approval", use_container_width=True, key="revoke_btn"):
                             try:
                                 execute_query(
-                                    "UPDATE users SET is_approved=FALSE WHERE username=%s AND institution_name=%s",
+                                    "UPDATE users SET is_approved=FALSE WHERE LOWER(username)=LOWER(%s) AND LOWER(institution_name)=LOWER(%s)",
                                     (revoke_user, INSTITUTION_NAME),
                                     fetch=False,
                                     commit=True
@@ -1884,21 +2113,20 @@ else:
                 st.error(f"❌ Error loading approvals: {str(e)}")
       
         with tab4:
-            # ✅ OPTIMIZED: Cache exams with manual refresh
             exams_data = st.session_state.cached_data.get('admin_exams')
             
             col1, col2 = st.columns([3, 1])
             with col2:
                 if st.button("🔄 Refresh Exams", key="refresh_admin_exams"):
                     exams_data = execute_query(
-                        "SELECT * FROM exams WHERE institution_name=%s ORDER BY created_at DESC",
+                        "SELECT * FROM exams WHERE LOWER(institution_name)=LOWER(%s) ORDER BY created_at DESC",
                         (INSTITUTION_NAME,)
                     )
                     st.session_state.cached_data['admin_exams'] = exams_data
             
             if exams_data is None:
                 exams_data = execute_query(
-                    "SELECT * FROM exams WHERE institution_name=%s ORDER BY created_at DESC",
+                    "SELECT * FROM exams WHERE LOWER(institution_name)=LOWER(%s) ORDER BY created_at DESC",
                     (INSTITUTION_NAME,)
                 )
                 st.session_state.cached_data['admin_exams'] = exams_data
@@ -1908,7 +2136,6 @@ else:
                 if not exams_df.empty:
                     st.dataframe(exams_df[['id', 'teacher', 'batch_name', 'subject', 'exam_date', 'start_time', 'end_time']], use_container_width=True)
                     
-                    # Delete exam option
                     exam_to_delete = st.selectbox("Select Exam to Delete", exams_df['id'].tolist(), key="admin_delete_exam", format_func=lambda x: f"Exam {x} - {exams_df[exams_df['id']==x]['subject'].iloc[0]}")
                     if st.button("🗑️ Delete Exam", type="primary", key="admin_delete_exam_btn"):
                         execute_query("DELETE FROM exams WHERE id=%s", (exam_to_delete,), fetch=False, commit=True)
@@ -1922,21 +2149,20 @@ else:
                 st.info("No exams found")
         
         with tab5:
-            # ✅ OPTIMIZED: Cache results with manual refresh
             results_data = st.session_state.cached_data.get('admin_results')
             
             col1, col2 = st.columns([3, 1])
             with col2:
                 if st.button("🔄 Refresh Results", key="refresh_admin_results"):
                     results_data = execute_query(
-                        "SELECT * FROM results WHERE institution_name=%s ORDER BY timestamp DESC",
+                        "SELECT * FROM results WHERE LOWER(institution_name)=LOWER(%s) ORDER BY timestamp DESC",
                         (INSTITUTION_NAME,)
                     )
                     st.session_state.cached_data['admin_results'] = results_data
             
             if results_data is None:
                 results_data = execute_query(
-                    "SELECT * FROM results WHERE institution_name=%s ORDER BY timestamp DESC",
+                    "SELECT * FROM results WHERE LOWER(institution_name)=LOWER(%s) ORDER BY timestamp DESC",
                     (INSTITUTION_NAME,)
                 )
                 st.session_state.cached_data['admin_results'] = results_data
@@ -1946,13 +2172,11 @@ else:
                 if not results_df.empty:
                     st.dataframe(results_df[['student', 'subject', 'score', 'total', 'timestamp']], use_container_width=True)
                     
-                    # Statistics
                     total_students = len(results_df['student'].unique())
                     avg_score = results_df['score'].mean() if not results_df.empty else 0
                     st.metric("Total Students Appeared", total_students)
                     st.metric("Average Score", f"{avg_score:.1f}")
                     
-                    # Delete result option
                     result_to_delete = st.selectbox("Select Result to Delete", results_df['id'].tolist(), key="admin_delete_result", format_func=lambda x: f"Result {x}")
                     if st.button("🗑️ Delete Result", type="primary", key="admin_delete_result_btn"):
                         execute_query("DELETE FROM results WHERE id=%s", (result_to_delete,), fetch=False, commit=True)
@@ -1966,7 +2190,7 @@ else:
                 st.info("No results found")
     
     # ============================================
-    # ✅ OPTIMIZED: TEACHER PANEL WITH CACHING AND FIXED FEATURES
+    # ✅ OPTIMIZED: TEACHER PANEL with dropdown time picker
     # ============================================
     elif user['role'] == "Teacher":
         st.markdown(f"### 👨‍🏫 Teacher Dashboard")
@@ -1976,7 +2200,6 @@ else:
         with tab1:
             st.markdown("#### Create New Exam")
             
-            # ✅ OPTIMIZED: Use cached batches
             batches_data = get_cached_batches(user['name'], INSTITUTION_NAME)
             batches = [row['batch_name'] for row in batches_data] if batches_data else []
             
@@ -1994,16 +2217,43 @@ else:
                 exam_date = st.date_input("📅 Exam Date", datetime.now(), key="teacher_date")
                 q_num = st.number_input("❓ Number of Questions", 1, 30, 5, key="teacher_qnum")
             
-            col1, col2 = st.columns(2)
-            with col1:
-                start_time = st.text_input("⏰ Start Time (e.g., 9:00 AM)", "9:00 AM", key="teacher_start")
-            with col2:
-                end_time = st.text_input("⏰ End Time (e.g., 10:30 AM)", "10:30 AM", key="teacher_end")
+            # ✅ NEW: Dropdown time picker for start time
+            st.markdown("#### ⏰ Start Time")
+            st.markdown('<div class="time-dropdown-container">', unsafe_allow_html=True)
+            col_start1, col_start2, col_start3 = st.columns(3)
+            with col_start1:
+                start_hour = st.selectbox("Hour", list(range(1, 13)), index=8, key="start_hour")  # Default 9
+            with col_start2:
+                start_minute = st.selectbox("Minute", [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55], index=0, key="start_minute", format_func=lambda x: f"{x:02d}")
+            with col_start3:
+                start_am_pm = st.selectbox("AM/PM", ["AM", "PM"], index=0, key="start_am_pm")  # Default AM
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+            # ✅ NEW: Dropdown time picker for end time
+            st.markdown("#### ⏰ End Time")
+            st.markdown('<div class="time-dropdown-container">', unsafe_allow_html=True)
+            col_end1, col_end2, col_end3 = st.columns(3)
+            with col_end1:
+                end_hour = st.selectbox("Hour", list(range(1, 13)), index=10, key="end_hour")  # Default 10
+            with col_end2:
+                end_minute = st.selectbox("Minute", [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55], index=0, key="end_minute", format_func=lambda x: f"{x:02d}")
+            with col_end3:
+                end_am_pm = st.selectbox("AM/PM", ["AM", "PM"], index=1 if start_hour == 10 else 0, key="end_am_pm")  # Default based on start
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+            # Convert dropdown to time objects
+            start_time_obj = get_time_from_dropdown(start_hour, start_minute, start_am_pm)
+            end_time_obj = get_time_from_dropdown(end_hour, end_minute, end_am_pm)
+            
+            # Display selected times
+            if start_time_obj and end_time_obj:
+                st.info(f"Selected Time: {start_time_obj.strftime('%I:%M %p')} - {end_time_obj.strftime('%I:%M %p')} (IST)")
+            else:
+                st.error("❌ Invalid time selection")
             
             q_type = st.selectbox("📝 Question Type", ["Multiple Choice (MCQ)", "Fill in Blanks", "Mixed"], key="teacher_qtype")
             level = st.selectbox("📊 Difficulty", ["Easy", "Medium", "Hard"], key="teacher_level")
             
-            # Multiple file uploader
             st.markdown("### 📎 Upload Study Materials")
             st.info("You can upload multiple files (images or PDFs). Questions will be generated from ALL uploaded content.")
             files = st.file_uploader(
@@ -2027,10 +2277,11 @@ else:
                     st.error("❌ Please upload at least one file")
                 elif not gemini_model:
                     st.error("❌ Gemini AI not available. Please check your API key.")
+                elif not start_time_obj or not end_time_obj:
+                    st.error("❌ Please select valid start and end times")
                 else:
                     with st.spinner(f"🤖 AI is generating {q_num} questions from {len(files)} files... This may take a moment."):
                         try:
-                            # Process all uploaded files
                             content = process_uploaded_files(files)
                             
                             if not content:
@@ -2039,7 +2290,6 @@ else:
                             
                             st.info(f"✅ Processed {len(content)} content items from {len(files)} files")
                             
-                            # Create prompt based on question type
                             if q_type == "Mixed":
                                 mcq_count = q_num // 2
                                 fill_count = q_num - mcq_count
@@ -2052,10 +2302,8 @@ else:
                             else:
                                 prompt = f"Generate {q_num} {level} level fill-in-the-blanks questions based on ALL the uploaded content from all files. Format as JSON list with 'type':'blank', 'question' (with ____ for blank), 'answer', 'explanation'."
                             
-                            # Prepare content for Gemini
                             ai_content = [prompt] + content
                             
-                            # Generate questions
                             response = gemini_model.generate_content(
                                 ai_content,
                                 generation_config={
@@ -2064,25 +2312,21 @@ else:
                                 }
                             )
                             
-                            # Extract JSON from response
                             json_match = re.search(r'\[.*\]', response.text, re.DOTALL)
                             if json_match:
                                 quiz_data = json.loads(json_match.group())
                                 
-                                # Validate quiz data
                                 if not isinstance(quiz_data, list) or len(quiz_data) == 0:
                                     st.error("❌ Generated questions are not in the expected format")
                                     st.stop()
                                 
-                                # Save to database
                                 execute_query(
                                     'INSERT INTO exams (teacher, batch_name, subject, quiz_json, exam_date, start_time, end_time, institution_name) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)',
-                                    (user['name'], target_batch, subject, json.dumps(quiz_data), exam_date, parse_time_input(start_time), parse_time_input(end_time), INSTITUTION_NAME),
+                                    (user['name'], target_batch, subject, json.dumps(quiz_data), exam_date, start_time_obj, end_time_obj, INSTITUTION_NAME),
                                     fetch=False,
                                     commit=True
                                 )
                                 
-                                # Clear cache
                                 clear_cache()
                                 
                                 st.success(f"✅ Exam published successfully with {len(quiz_data)} questions from {len(files)} files!")
@@ -2099,7 +2343,6 @@ else:
         with tab2:
             st.markdown("#### 📋 Published Exams")
             
-            # ✅ OPTIMIZED: Use cached exams with manual refresh
             col1, col2 = st.columns([3, 1])
             with col2:
                 if st.button("🔄 Refresh", key="refresh_teacher_exams"):
@@ -2116,7 +2359,6 @@ else:
                         questions = json.loads(exam['quiz_json'])
                         st.write(f"📊 Total Questions: {len(questions)}")
                         
-                        # ✅ FIXED: Only show download button, no questions displayed
                         if st.button("📥 Download Question Paper", key=f"download_exam_{exam['id']}"):
                             pdf = generate_exam_pdf(
                                 teacher_name=exam['teacher'],
@@ -2133,7 +2375,6 @@ else:
                                 key=f"save_exam_pdf_{exam['id']}"
                             )
                         
-                        # Delete button
                         if st.button("🗑️ Delete Exam", key=f"del_{exam['id']}"):
                             execute_query("DELETE FROM exams WHERE id=%s", (exam['id'],), fetch=False, commit=True)
                             clear_cache()
@@ -2144,7 +2385,6 @@ else:
         with tab3:
             st.markdown("#### 📊 Class Reports")
             
-            # ✅ OPTIMIZED: Use cached batches
             batches_data = get_cached_batches(user['name'], INSTITUTION_NAME)
             batches = [row['batch_name'] for row in batches_data] if batches_data else []
             
@@ -2158,14 +2398,13 @@ else:
                         st.cache_data.clear()
                         st.rerun()
                 
-                # Get results with subject information
                 if selected_subject:
                     results_data = execute_query("""
                         SELECT r.*, e.subject as exam_subject 
                         FROM results r
                         JOIN exams e ON r.exam_id = e.id
                         WHERE r.institution_name=%s
-                        AND e.batch_name=%s AND e.subject=%s
+                        AND LOWER(e.batch_name)=LOWER(%s) AND LOWER(e.subject)=LOWER(%s)
                         ORDER BY r.timestamp DESC
                     """, (INSTITUTION_NAME, selected_batch, selected_subject))
                 else:
@@ -2174,31 +2413,28 @@ else:
                         FROM results r
                         JOIN exams e ON r.exam_id = e.id
                         WHERE r.institution_name=%s
-                        AND e.batch_name=%s
+                        AND LOWER(e.batch_name)=LOWER(%s)
                         ORDER BY r.timestamp DESC
                     """, (INSTITUTION_NAME, selected_batch))
                 
                 if results_data:
                     results = pd.DataFrame(results_data)
                     
-                    # ✅ FIXED: Display subject correctly in UI
                     display_df = results[['student', 'exam_subject', 'score', 'total', 'timestamp']].copy()
                     display_df.columns = ['Student', 'Subject', 'Score', 'Total', 'Date']
                     
                     st.dataframe(display_df, use_container_width=True)
                     
-                    # Prepare data for PDF
                     pdf_data = []
                     for _, r in results.iterrows():
                         pdf_data.append({
                             'student': r['student'],
                             'score': r['score'],
                             'total': r['total'],
-                            'subject': r['exam_subject'],  # ✅ FIXED: Use exam_subject
+                            'subject': r['exam_subject'],
                             'date': format_timestamp(r['timestamp'])
                         })
                     
-                    # Download PDF button
                     if st.button("📥 Download Class Report PDF", use_container_width=True):
                         pdf = generate_teacher_pdf(
                             teacher_name=user['name'],
@@ -2219,7 +2455,7 @@ else:
                 st.info("No batches assigned")
     
     # ============================================
-    # ✅ FIXED: STUDENT PANEL WITH REAL-TIME TIMER AND AUTO-SUBMIT
+    # ✅ FIXED: STUDENT PANEL WITH IMPROVED EXAM DISPLAY
     # ============================================
     elif user['role'] == "Student":
         
@@ -2235,7 +2471,6 @@ else:
                 </div>
             """, unsafe_allow_html=True)
             
-            # Download PDF only - NO QUESTIONS DISPLAYED
             st.markdown("### 📥 Download Your Exam Report")
             st.info("Click the button below to download your complete exam report with all questions and answers.")
             
@@ -2257,41 +2492,57 @@ else:
                     key="download_pdf"
                 )
             
-            # Clear result and return to dashboard
             if st.button("📊 Back to Dashboard", use_container_width=True):
-                # Clean up exam state
                 st.session_state.exam_result = None
                 st.session_state.active_exam = None
                 st.session_state.shuffled_qs = []
                 st.session_state.exam_answers = {}
                 st.session_state.exam_end_time = None
                 st.session_state.exam_auto_submitted = False
+                st.session_state.exam_session_id = None
+                st.session_state.exam_logged = False
                 st.rerun()
         
-        # ✅ FIXED: Active exam with real-time timer and auto-submit
+        # ✅ FIXED: Active exam with power failure handling
         elif st.session_state.active_exam:
             exam = st.session_state.active_exam
             
-            # Initialize timer if needed
+            # Check if this exam was already submitted (prevents duplicate on reload) with case-insensitive matching
+            existing_result = execute_query(
+                "SELECT * FROM results WHERE LOWER(student)=LOWER(%s) AND exam_id=%s",
+                (user['name'], exam['id'])
+            )
+            
+            if existing_result:
+                # Already submitted - load result
+                result_data = existing_result[0]
+                st.session_state.exam_result = {
+                    "score": result_data['score'],
+                    "total": result_data['total'],
+                    "subject": result_data['subject'],
+                    "review": json.loads(result_data['review_json'])
+                }
+                st.session_state.active_exam = None
+                st.rerun()
+            
+            # Log session for power failure recovery
+            log_exam_session(user['name'], exam['id'])
+            
             initialize_exam_timer()
             
-            # Check for auto-submit FIRST - before any display
+            # Check for auto-submit
             auto_submitted = auto_submit_exam()
             if auto_submitted:
-                # Result is now in st.session_state.exam_result
-                # Clear exam state but keep result
                 st.session_state.active_exam = None
                 st.session_state.shuffled_qs = []
                 st.rerun()
             
-            # Calculate remaining time for display
             remaining_seconds = 0
             if st.session_state.exam_end_time:
                 remaining_seconds = int(st.session_state.exam_end_time - time.time())
                 if remaining_seconds < 0:
                     remaining_seconds = 0
             
-            # Display timer
             timer_placeholder = st.empty()
             timer_placeholder.markdown(f"""
                 <div class="timer-box">
@@ -2307,7 +2558,6 @@ else:
                 </div>
             """, unsafe_allow_html=True)
             
-            # Questions with AUTO-SAVE
             st.markdown("### 📝 Answer Questions (Answers auto-saved)")
             
             for i, q in enumerate(st.session_state.shuffled_qs):
@@ -2315,11 +2565,9 @@ else:
                 
                 saved_answer = st.session_state.exam_answers.get(str(i), "")
                 
-                # Create a unique key for each question
                 input_key = f"ans_{i}"
                 
                 if q.get('type') == 'blank' or 'fill' in str(q.get('type', '')).lower():
-                    # Text input for fill-in-blanks
                     answer = st.text_input(
                         f"Your Answer for Q{i+1}", 
                         value=saved_answer, 
@@ -2328,41 +2576,40 @@ else:
                         placeholder="Type your answer here..."
                     )
                 else:
-                    # Radio buttons for MCQ
                     options = q.get('options', ['Option A', 'Option B', 'Option C', 'Option D'])
                     
-                    # Find index of saved answer
-                    idx = 0
-                    if saved_answer in options:
+                    idx = None
+                    if saved_answer and saved_answer in options:
                         idx = options.index(saved_answer)
                     
                     answer = st.radio(
                         f"Options for Q{i+1}", 
                         options, 
-                        index=idx, 
+                        index=idx,
                         key=input_key,
                         label_visibility="collapsed",
                         horizontal=True
                     )
                 
-                # AUTO-SAVE: Update session state when answer changes
                 if answer != saved_answer:
-                    st.session_state.exam_answers[str(i)] = answer
+                    if answer is None or answer == "":
+                        st.session_state.exam_answers[str(i)] = ""
+                    else:
+                        st.session_state.exam_answers[str(i)] = answer
                     st.session_state.answer_saved[str(i)] = True
                 
-                # Show small indicator that answer is saved
                 if st.session_state.exam_answers.get(str(i), ""):
                     st.caption("✓ Saved")
+                else:
+                    st.caption("⚪ Not answered")
                 
                 st.divider()
             
-            # Manual submit button (only show if time remaining)
             if remaining_seconds > 0 and not st.session_state.exam_auto_submitted:
                 col1, col2, col3 = st.columns([1, 2, 1])
                 with col2:
                     if st.button("📤 Submit Exam", type="primary", use_container_width=True, key="submit_exam"):
                         
-                        # Calculate score
                         score = 0
                         review = []
                         
@@ -2370,24 +2617,31 @@ else:
                             user_ans = str(st.session_state.exam_answers.get(str(i), "")).strip()
                             correct_ans = str(q.get('answer', '')).strip()
                         
-                            if user_ans and user_ans.lower() == correct_ans.lower():
+                            if user_ans and user_ans != "" and user_ans.lower() == correct_ans.lower():
                                 score += 1
                             
                             review.append({
                                 "question": q['question'],
-                                "user_ans": user_ans if user_ans else "Not answered",
+                                "user_ans": user_ans if user_ans else "",
                                 "correct_ans": correct_ans,
                                 "options": q.get('options', []),
                                 "explanation": q.get('explanation', 'No explanation available')
                             })
                         
-                        # Save to database
                         execute_query(
                             "INSERT INTO results (student, exam_id, score, total, subject, review_json, institution_name) VALUES (%s, %s, %s, %s, %s, %s, %s)",
                             (user['name'], exam['id'], score, len(review), exam['subject'], json.dumps(review), INSTITUTION_NAME),
                             fetch=False,
                             commit=True
                         )
+                        
+                        # Mark session as completed
+                        complete_exam_session(user['name'], exam['id'])
+                        
+                        # Clear cache
+                        cache_key = f"attempted_{normalize_text(user['name'])}"
+                        if cache_key in st.session_state.cached_data:
+                            del st.session_state.cached_data[cache_key]
                         
                         st.session_state.exam_result = {
                             "score": score,
@@ -2396,99 +2650,105 @@ else:
                             "review": review
                         }
                         
-                        # Clear exam state but keep result
                         st.session_state.active_exam = None
                         st.session_state.shuffled_qs = []
                         st.session_state.exam_answers = {}
                         st.session_state.answer_saved = {}
                         st.session_state.exam_end_time = None
                         st.session_state.exam_auto_submitted = False
+                        st.session_state.exam_session_id = None
+                        st.session_state.exam_logged = False
                         
                         st.rerun()
             
-            # Auto-refresh for timer update - runs every second
             if remaining_seconds > 0:
                 time.sleep(1)
                 st.rerun()
         
-        # Show available exams - ✅ OPTIMIZED WITH CACHING
+        # ✅ FIXED: Student Dashboard with proper exam categorization and case-insensitive matching
         else:
             st.markdown(f"### 🎓 Student Dashboard")
             
             if not user['batch']:
                 st.error("❌ No batch assigned. Please contact admin.")
             else:
-                # ✅ OPTIMIZED: Manual refresh button
                 col1, col2 = st.columns([3, 1])
                 with col2:
                     if st.button("🔄 Refresh Dashboard", key="refresh_student_dash"):
-                        st.cache_data.clear()
+                        clear_cache()
                         st.rerun()
                 
-                # ✅ OPTIMIZED: Use cached exams
-                today = datetime.now().date()
-                exams_data = get_cached_student_exams(user['batch'], INSTITUTION_NAME, today)
+                # Get exams with case-insensitive batch matching
+                exams_data = get_student_exams(user['batch'], INSTITUTION_NAME)
                 
-                # Get attempted exams
-                attempted_key = f"attempted_{user['name']}"
-                if attempted_key not in st.session_state.cached_data:
-                    attempted_data = execute_query(
-                        "SELECT exam_id FROM results WHERE student=%s",
-                        (user['name'],)
-                    )
-                    st.session_state.cached_data[attempted_key] = set(row['exam_id'] for row in attempted_data) if attempted_data else set()
+                # Get attempted exams (completed) with case-insensitive matching
+                attempted_ids = get_attempted_exam_ids(user['name'])
                 
-                attempted_ids = st.session_state.cached_data[attempted_key]
+                # ✅ NEW: Toggle for showing expired exams
+                st.session_state.show_expired_exams = st.checkbox(
+                    "Show Expired Exams", 
+                    value=st.session_state.show_expired_exams,
+                    key="show_expired_toggle",
+                    help="Check to display expired exams with ✓ tick mark"
+                )
                 
                 if exams_data:
                     exams = pd.DataFrame(exams_data)
-                    current_time_obj = datetime.now().time()
+                    current_time = datetime.now(IST)
                     
-                    upcoming = []
-                    available = []
+                    available_exams = []
                     soon_exams = []
+                    upcoming_exams = []
+                    expired_exams = []
                     
+                    # Filter out completed exams completely
                     for _, exam in exams.iterrows():
+                        # ✅ FIXED: Skip completed exams entirely - they won't appear in dashboard
                         if exam['id'] in attempted_ids:
                             continue
                         
+                        # Check if expired
+                        if is_exam_expired(exam):
+                            expired_exams.append(exam)
+                            continue
+                        
+                        # Parse exam date and times
                         if isinstance(exam['exam_date'], str):
                             exam_date = datetime.strptime(exam['exam_date'], '%Y-%m-%d').date()
                         else:
                             exam_date = exam['exam_date']
                         
-                        if exam_date > today:
-                            upcoming.append(exam)
-                        elif exam_date == today:
-                            start = exam['start_time']
-                            end = exam['end_time']
+                        if exam_date > current_time.date():
+                            upcoming_exams.append(exam)
+                        elif exam_date == current_time.date():
+                            if isinstance(exam['start_time'], str):
+                                start_time = datetime.strptime(exam['start_time'], '%H:%M:%S').time()
+                            else:
+                                start_time = exam['start_time']
                             
-                            if start and end:
-                                if isinstance(start, str):
-                                    start_time_obj = datetime.strptime(start, '%H:%M:%S').time()
+                            if isinstance(exam['end_time'], str):
+                                end_time = datetime.strptime(exam['end_time'], '%H:%M:%S').time()
+                            else:
+                                end_time = exam['end_time']
+                            
+                            start_datetime = datetime.combine(exam_date, start_time)
+                            start_datetime = IST.localize(start_datetime)
+                            
+                            if current_time < start_datetime:
+                                seconds_until = (start_datetime - current_time).total_seconds()
+                                if seconds_until <= 900:  # 15 minutes
+                                    soon_exams.append((exam, start_datetime, seconds_until))
                                 else:
-                                    start_time_obj = start
-                                
-                                if isinstance(end, str):
-                                    end_time_obj = datetime.strptime(end, '%H:%M:%S').time()
-                                else:
-                                    end_time_obj = end
-                                
-                                if current_time_obj < start_time_obj:
-                                    start_datetime = datetime.combine(exam_date, start_time_obj)
-                                    seconds_until = get_time_remaining_seconds(start_datetime)
-                                    
-                                    if seconds_until <= 900:  # 15 minutes
-                                        soon_exams.append((exam, start_datetime, seconds_until))
-                                    else:
-                                        upcoming.append(exam)
-                                elif start_time_obj <= current_time_obj <= end_time_obj:
-                                    available.append(exam)
+                                    upcoming_exams.append(exam)
+                            elif start_time <= current_time.time() <= end_time:
+                                available_exams.append(exam)
+                            elif current_time.time() > end_time:
+                                expired_exams.append(exam)
                     
                     # Display Available Exams
-                    if available:
+                    if available_exams:
                         st.markdown("### 📝 Available Now")
-                        for exam in available:
+                        for exam in available_exams:
                             st.markdown(f"""
                                 <div class="available-exam">
                                     <b>{exam['subject']}</b><br>
@@ -2498,21 +2758,22 @@ else:
                             """, unsafe_allow_html=True)
                             
                             if st.button("🚀 Start Exam", key=f"start_{exam['id']}"):
-                                # Load questions and set end time properly
                                 st.session_state.active_exam = dict(exam)
                                 st.session_state.shuffled_qs = json.loads(exam['quiz_json'])
                                 st.session_state.exam_answers = {}
                                 st.session_state.answer_saved = {}
                                 st.session_state.exam_auto_submitted = False
-                                st.session_state.exam_end_time = None  # Will be set in exam page
-                                
+                                st.session_state.exam_end_time = None
+                                st.session_state.exam_session_id = None
+                                st.session_state.exam_logged = False
+                                st.session_state.processing_submit = False
                                 st.rerun()
                     
                     # Display Soon Exams
                     if soon_exams:
                         st.markdown("### ⏳ Starting Soon")
                         for exam, start_datetime, seconds_until in soon_exams:
-                            current_seconds = get_time_remaining_seconds(start_datetime)
+                            current_seconds = (start_datetime - datetime.now(IST)).total_seconds()
                             
                             if current_seconds <= 0:
                                 st.markdown(f"""
@@ -2531,7 +2792,9 @@ else:
                                     st.session_state.answer_saved = {}
                                     st.session_state.exam_auto_submitted = False
                                     st.session_state.exam_end_time = None
-                                    
+                                    st.session_state.exam_session_id = None
+                                    st.session_state.exam_logged = False
+                                    st.session_state.processing_submit = False
                                     st.rerun()
                             else:
                                 mins = int(current_seconds // 60)
@@ -2547,9 +2810,9 @@ else:
                                 """, unsafe_allow_html=True)
                     
                     # Display Upcoming Exams
-                    if upcoming:
+                    if upcoming_exams:
                         st.markdown("### 📅 Upcoming Exams")
-                        for exam in upcoming:
+                        for exam in upcoming_exams:
                             st.markdown(f"""
                                 <div class="upcoming-exam">
                                     <b>{exam['subject']}</b><br>
@@ -2558,15 +2821,37 @@ else:
                                 </div>
                             """, unsafe_allow_html=True)
                     
-                    if not upcoming and not available and not soon_exams:
-                        st.info("🎉 No exams available at this time")
+                    # ✅ FIXED: Display Expired Exams only if toggle is checked
+                    if expired_exams and st.session_state.show_expired_exams:
+                        st.markdown("### ⏰ Expired Exams")
+                        for exam in expired_exams:
+                            st.markdown(f"""
+                                <div class="expired-exam">
+                                    <b>{exam['subject']}</b><br>
+                                    📅 Date: {exam['exam_date']} | ⏰ Time: {format_time(exam['start_time'])} - {format_time(exam['end_time'])}<br>
+                                    👨‍🏫 Teacher: {exam['teacher']}<br>
+                                    <span style="color: #f44336;">⚠️ Exam period has ended</span>
+                                    <span class="expired-exam-tick">✔</span>
+                                </div>
+                            """, unsafe_allow_html=True)
+                    
+                    # ✅ FIXED: Check if there are any exams to display (excluding expired if toggle off)
+                    has_displayable_exams = (
+                        available_exams or 
+                        soon_exams or 
+                        upcoming_exams or 
+                        (expired_exams and st.session_state.show_expired_exams)
+                    )
+                    
+                    if not has_displayable_exams:
+                        st.info("📭 No Available Exams Now")
                 else:
-                    st.info("📚 No exams scheduled for your batch")
+                    st.info("📭 No Available Exams Now")
             
-            # ✅ OPTIMIZED: Results - using cached data
+            # ✅ OPTIMIZED: Results display with case-insensitive matching
             st.markdown("### 📊 My Results")
             
-            results_data = get_cached_results(user['name'], INSTITUTION_NAME)
+            results_data = get_student_results(user['name'], INSTITUTION_NAME)
             
             if results_data:
                 results = pd.DataFrame(results_data)
@@ -2574,7 +2859,6 @@ else:
                     score_pct = int((r['score']/r['total'])*100)
                     timestamp_str = format_timestamp(r['timestamp'])
                     
-                    # Simple display with only download button
                     col1, col2, col3 = st.columns([2, 1, 1])
                     with col1:
                         st.markdown(f"**{r['subject']}** - Score: {r['score']}/{r['total']} ({score_pct}%)")
@@ -2604,7 +2888,7 @@ else:
                 st.info("No exam history found")
 
 # ============================================
-# 15. FOOTER - UPDATED WITH DEVELOPER CREDIT
+# 15. FOOTER
 # ============================================
 
 st.markdown(f"""
