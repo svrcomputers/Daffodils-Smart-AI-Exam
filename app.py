@@ -41,7 +41,7 @@ import pytz
 load_dotenv()
 
 # Institution Configuration
-INSTITUTION_NAME = "DAFFODILS HIGH SCHOOL"
+INSTITUTION_NAME = "DEMO SMART-AI-PAPER LESS-EXAM"
 INSTITUTION_SECRET = os.getenv("INSTITUTION_SECRET", os.getenv("SCHOOL_SECRET", "1234"))
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", os.getenv("SCHOOL_ADMIN_PASSWORD", "2109"))
 
@@ -50,7 +50,7 @@ IST = pytz.timezone('Asia/Kolkata')
 
 # Streamlit Page Config
 st.set_page_config(
-    page_title=f"📚 DAFFODILS HIGH SCHOOL AI Exam Portal", 
+    page_title=f"📚 DEMO SMART-AI-PAPER LESS-EXAM AI Exam Portal", 
     layout="wide",
     initial_sidebar_state="collapsed"
 )
@@ -110,6 +110,10 @@ if 'show_expired_exams' not in st.session_state:
     st.session_state.show_expired_exams = False
 if 'selected_approved_users' not in st.session_state:
     st.session_state.selected_approved_users = set()
+if 'timer_placeholder_created' not in st.session_state:
+    st.session_state.timer_placeholder_created = False
+if 'last_timer_update' not in st.session_state:
+    st.session_state.last_timer_update = 0
 
 # ============================================
 # ✅ NEW: CASE-INSENSITIVE NORMALIZATION HELPER
@@ -140,7 +144,7 @@ except Exception as e:
 
 @st.cache_resource
 def init_connection_pool():
-    """Initialize connection pool with minimal connections for free tier"""
+    """Initialize connection pool with increased connections for better performance"""
     try:
         DATABASE_URL = os.getenv("NEON_DATABASE_URL")
         if not DATABASE_URL:
@@ -152,9 +156,10 @@ def init_connection_pool():
         else:
             base_url = DATABASE_URL
         
+        # ✅ INCREASED: maxconn from 5 to 20 for better performance
         connection_pool = psycopg2.pool.SimpleConnectionPool(
-            minconn=1,
-            maxconn=5,
+            minconn=2,
+            maxconn=20,
             dsn=base_url,
             sslmode='require',
             connect_timeout=10
@@ -1330,7 +1335,7 @@ st.markdown("""
 
 # Display Header
 st.markdown(f'<p class="main-header">📚 AI SMART EXAM PORTAL</p>', unsafe_allow_html=True)
-st.markdown(f'<p class="institution-name">🏫 DAFFODILS HIGH SCHOOL</p>', unsafe_allow_html=True)
+st.markdown(f'<p class="institution-name">🏫 DEMO SMART-AI-PAPER LESS-EXAM</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-header">AI-Powered Examination System for All Educational Institutions</p>', unsafe_allow_html=True)
 
 # ============================================
@@ -1404,7 +1409,7 @@ if st.session_state.user is None:
     
     st.markdown(f"""
         <div style="text-align: center; padding: 30px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 20px; margin-bottom: 30px;">
-            <h1 style="color: white; font-size: 48px;">📚 DAFFODILS HIGH SCHOOL</h1>
+            <h1 style="color: white; font-size: 48px;">📚 DEMO SMART-AI-PAPER LESS-EXAM</h1>
             <p style="color: white; font-size: 20px;">Welcome to AI-Powered Smart Examination Portal</p>
         </div>
     """, unsafe_allow_html=True)
@@ -1421,14 +1426,14 @@ if st.session_state.user is None:
         with tab_login:
             st.markdown('<div class="scrollable-content">', unsafe_allow_html=True)
             
-            st.markdown(f"### 📝 Login to DAFFODILS HIGH SCHOOL")
+            st.markdown(f"### 📝 Login to DEMO SMART-AI-PAPER LESS-EXAM")
             mode = st.radio("Select Action", ["Login", "New Registration"], horizontal=True, key="login_mode")
             
             u_name = st.text_input("👤 Username", key="login_username")
             u_pass = st.text_input("🔑 Password", type='password', key="login_password")
             
             if mode == "New Registration":
-                st.info(f"🏫 Institution: DAFFODILS HIGH SCHOOL")
+                st.info(f"🏫 Institution: DEMO SMART-AI-PAPER LESS-EXAM")
                 secret_code = st.text_input("🔐 Institution Secret Code", type="password", key="reg_secret")
                 
                 role = st.selectbox("👔 Role", ["Teacher", "Student"], key="reg_role")
@@ -1588,7 +1593,7 @@ if st.session_state.user is None:
 else:
     col1, col2 = st.columns([3, 1])
     with col1:
-        st.markdown(f"### 📚 DAFFODILS HIGH SCHOOL")
+        st.markdown(f"### 📚 DEMO SMART-AI-PAPER LESS-EXAM")
         st.markdown(f"👋 **{st.session_state.user['name']}** | Role: **{st.session_state.user['role']}**")
         if st.session_state.user['role'] == "Student" and st.session_state.user['batch']:
             st.markdown(f"📚 Batch: **{st.session_state.user['batch']}**")
@@ -1608,6 +1613,8 @@ else:
             st.session_state.exam_logged = False
             st.session_state.processing_submit = False
             st.session_state.show_expired_exams = False
+            st.session_state.exam_questions_loaded = False
+            st.session_state.timer_placeholder_created = False
             clear_cache()
             st.rerun()
     
@@ -2501,9 +2508,11 @@ else:
                 st.session_state.exam_auto_submitted = False
                 st.session_state.exam_session_id = None
                 st.session_state.exam_logged = False
+                st.session_state.exam_questions_loaded = False
+                st.session_state.timer_placeholder_created = False
                 st.rerun()
         
-        # ✅ FIXED: Active exam with power failure handling
+        # ✅ FIXED: Active exam with power failure handling - NO RERUNS
         elif st.session_state.active_exam:
             exam = st.session_state.active_exam
             
@@ -2537,18 +2546,54 @@ else:
                 st.session_state.shuffled_qs = []
                 st.rerun()
             
+            # ✅ FIXED: Load questions only once
+            if not st.session_state.exam_questions_loaded:
+                st.session_state.shuffled_qs = json.loads(exam['quiz_json'])
+                st.session_state.exam_questions_loaded = True
+            
             remaining_seconds = 0
             if st.session_state.exam_end_time:
                 remaining_seconds = int(st.session_state.exam_end_time - time.time())
                 if remaining_seconds < 0:
                     remaining_seconds = 0
             
+            # ✅ FIXED: Use placeholder for timer - NO RERUN
             timer_placeholder = st.empty()
             timer_placeholder.markdown(f"""
                 <div class="timer-box">
                     ⏰ Time Remaining: {remaining_seconds // 3600:02d}:{(remaining_seconds % 3600) // 60:02d}:{remaining_seconds % 60:02d}
                 </div>
             """, unsafe_allow_html=True)
+            
+            # ✅ FIXED: Update timer using JavaScript for smooth countdown
+            if remaining_seconds > 0 and not st.session_state.exam_auto_submitted:
+                timer_placeholder.markdown(f"""
+                    <div class="timer-box" id="exam-timer">
+                        ⏰ Time Remaining: <span id="timer-display">{remaining_seconds // 3600:02d}:{(remaining_seconds % 3600) // 60:02d}:{remaining_seconds % 60:02d}</span>
+                    </div>
+                    <script>
+                        let remaining = {remaining_seconds};
+                        const timerDisplay = document.getElementById('timer-display');
+                        
+                        function updateTimer() {{
+                            if (remaining <= 0) {{
+                                clearInterval(timerInterval);
+                                window.location.reload();
+                                return;
+                            }}
+                            remaining -= 1;
+                            const hours = Math.floor(remaining / 3600);
+                            const minutes = Math.floor((remaining % 3600) / 60);
+                            const seconds = remaining % 60;
+                            timerDisplay.textContent = 
+                                String(hours).padStart(2, '0') + ':' + 
+                                String(minutes).padStart(2, '0') + ':' + 
+                                String(seconds).padStart(2, '0');
+                                                    }}
+                        
+                        const timerInterval = setInterval(updateTimer, 1000);
+                    </script>
+                """, unsafe_allow_html=True)
             
             st.markdown(f"""
                 <div class="exam-info">
@@ -2658,12 +2703,10 @@ else:
                         st.session_state.exam_auto_submitted = False
                         st.session_state.exam_session_id = None
                         st.session_state.exam_logged = False
+                        st.session_state.exam_questions_loaded = False
+                        st.session_state.timer_placeholder_created = False
                         
                         st.rerun()
-            
-            if remaining_seconds > 0:
-                time.sleep(1)
-                st.rerun()
         
         # ✅ FIXED: Student Dashboard with proper exam categorization and case-insensitive matching
         else:
@@ -2759,7 +2802,6 @@ else:
                             
                             if st.button("🚀 Start Exam", key=f"start_{exam['id']}"):
                                 st.session_state.active_exam = dict(exam)
-                                st.session_state.shuffled_qs = json.loads(exam['quiz_json'])
                                 st.session_state.exam_answers = {}
                                 st.session_state.answer_saved = {}
                                 st.session_state.exam_auto_submitted = False
@@ -2767,6 +2809,8 @@ else:
                                 st.session_state.exam_session_id = None
                                 st.session_state.exam_logged = False
                                 st.session_state.processing_submit = False
+                                st.session_state.exam_questions_loaded = False
+                                st.session_state.timer_placeholder_created = False
                                 st.rerun()
                     
                     # Display Soon Exams
@@ -2787,7 +2831,6 @@ else:
                                 
                                 if st.button("🚀 Click to Start Exam", key=f"start_soon_{exam['id']}"):
                                     st.session_state.active_exam = dict(exam)
-                                    st.session_state.shuffled_qs = json.loads(exam['quiz_json'])
                                     st.session_state.exam_answers = {}
                                     st.session_state.answer_saved = {}
                                     st.session_state.exam_auto_submitted = False
@@ -2795,6 +2838,8 @@ else:
                                     st.session_state.exam_session_id = None
                                     st.session_state.exam_logged = False
                                     st.session_state.processing_submit = False
+                                    st.session_state.exam_questions_loaded = False
+                                    st.session_state.timer_placeholder_created = False
                                     st.rerun()
                             else:
                                 mins = int(current_seconds // 60)
@@ -2893,7 +2938,7 @@ else:
 
 st.markdown(f"""
     <div class="footer">
-        © {datetime.now().year} DAFFODILS HIGH SCHOOL AI Exam Portal | All Rights Reserved<br>
+        © {datetime.now().year} DEMO SMART-AI-PAPER LESS-EXAM AI Exam Portal | All Rights Reserved<br>
         Designed and Developed by <b> SVR COMPUTERS </b>
     </div>
 """, unsafe_allow_html=True)
